@@ -29,6 +29,45 @@ typedef enum {
   STATE_ANSWER,
 } AppState;
 
+// ── Pending Category (for retry logic) ───────────────────────
+
+static uint8_t s_pending_category = 0;
+static AppTimer *s_retry_timer = NULL;
+
+static void send_category_now(void *data);
+
+static void schedule_category_retry(void) {
+  if (s_retry_timer) app_timer_cancel(s_retry_timer);
+  s_retry_timer = app_timer_register(1000, send_category_now, NULL);
+}
+
+static void send_category_now(void *data) {
+  s_retry_timer = NULL;
+  DictionaryIterator *iter;
+  AppMessageResult result = app_message_outbox_begin(&iter);
+  if (result == APP_MSG_OK) {
+    dict_write_uint8(iter, MSG_KEY_REQUEST_NEXT, s_pending_category);
+    app_message_outbox_send();
+  } else {
+    // Not connected yet — retry in 1 second
+    schedule_category_retry();
+  }
+}
+
+static void outbox_failed_cb(DictionaryIterator *iter,
+                              AppMessageResult reason, void *context) {
+  // Retry sending the category if it failed
+  schedule_category_retry();
+}
+
+static void outbox_sent_cb(DictionaryIterator *iter, void *context) {
+  // Cancel any pending retry — message was delivered
+  if (s_retry_timer) {
+    app_timer_cancel(s_retry_timer);
+    s_retry_timer = NULL;
+  }
+}
+
 // ── Category Data ─────────────────────────────────────────────
 
 typedef struct {
@@ -77,16 +116,11 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer,
   menu_cell_basic_draw(ctx, cell_layer, CATEGORIES[idx->row].name, NULL, NULL);
 }
 static void menu_select(MenuLayer *l, MenuIndex *idx, void *ctx) {
-  uint8_t cat_id = CATEGORIES[idx->row].id;
-
-  // Send category ID via REQUEST_NEXT (any value != 1 means "switch category")
-  DictionaryIterator *iter;
-  if (app_message_outbox_begin(&iter) == APP_MSG_OK) {
-    dict_write_uint8(iter, MSG_KEY_REQUEST_NEXT, cat_id);
-    app_message_outbox_send();
-  }
-
+  s_pending_category = CATEGORIES[idx->row].id;
   trivia_window_push();
+  // Small delay before first send so AppMessage connection can establish
+  if (s_retry_timer) app_timer_cancel(s_retry_timer);
+  s_retry_timer = app_timer_register(300, send_category_now, NULL);
 }
 
 static void menu_window_load(Window *window) {
@@ -292,6 +326,8 @@ static void inbox_dropped(AppMessageResult reason, void *context) {
 static void init(void) {
   app_message_register_inbox_received(inbox_received);
   app_message_register_inbox_dropped(inbox_dropped);
+  app_message_register_outbox_sent(outbox_sent_cb);
+  app_message_register_outbox_failed(outbox_failed_cb);
   app_message_open(512, 64);
 
   // Trivia window (not pushed yet)
@@ -312,6 +348,7 @@ static void init(void) {
 }
 
 static void deinit(void) {
+  if (s_retry_timer) app_timer_cancel(s_retry_timer);
   window_destroy(s_trivia_window);
   window_destroy(s_menu_window);
 }
