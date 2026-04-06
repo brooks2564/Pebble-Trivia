@@ -15,7 +15,11 @@
 #define MSG_KEY_QUESTION     10001
 #define MSG_KEY_ANSWER       10002
 #define MSG_KEY_REQUEST_NEXT 10003
-#define MSG_KEY_SET_CATEGORY 10004
+
+// Protocol: REQUEST_NEXT value=1 means "next question"
+//           REQUEST_NEXT value=cat_id means "switch to category cat_id"
+//           (no category id equals 1, so there is no ambiguity)
+#define REQUEST_NEXT_QUESTION 1
 
 #define SCROLL_STEP 30
 
@@ -75,10 +79,10 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer,
 static void menu_select(MenuLayer *l, MenuIndex *idx, void *ctx) {
   uint8_t cat_id = CATEGORIES[idx->row].id;
 
-  // Tell JS which category to use
+  // Send category ID via REQUEST_NEXT (any value != 1 means "switch category")
   DictionaryIterator *iter;
   if (app_message_outbox_begin(&iter) == APP_MSG_OK) {
-    dict_write_uint8(iter, MSG_KEY_SET_CATEGORY, cat_id);
+    dict_write_uint8(iter, MSG_KEY_REQUEST_NEXT, cat_id);
     app_message_outbox_send();
   }
 
@@ -180,7 +184,7 @@ static void down_click(ClickRecognizerRef recognizer, void *context) {
 static void request_next(void) {
   DictionaryIterator *iter;
   if (app_message_outbox_begin(&iter) == APP_MSG_OK) {
-    dict_write_uint8(iter, MSG_KEY_REQUEST_NEXT, 1);
+    dict_write_uint8(iter, MSG_KEY_REQUEST_NEXT, REQUEST_NEXT_QUESTION);
     app_message_outbox_send();
   }
   s_state = STATE_LOADING;

@@ -9,7 +9,8 @@ var KEY_CATEGORY     = 10000;
 var KEY_QUESTION     = 10001;
 var KEY_ANSWER       = 10002;
 var KEY_REQUEST_NEXT = 10003;
-var KEY_SET_CATEGORY = 10004;
+// Protocol: REQUEST_NEXT value=1 → send next question
+//           REQUEST_NEXT value=anything else → switch to that category ID
 
 var queue = [];
 var fetching = false;
@@ -124,17 +125,18 @@ Pebble.addEventListener('ready', function() {
 });
 
 Pebble.addEventListener('appmessage', function(e) {
-  if (e.payload[KEY_SET_CATEGORY] !== undefined) {
-    // Category selected — reset and fetch fresh questions
-    currentCategoryId = parseInt(e.payload[KEY_SET_CATEGORY], 10);
-    fetchGen++;        // invalidates any in-flight XHR from previous category
+  var val = parseInt(e.payload[KEY_REQUEST_NEXT], 10);
+  if (val === 1) {
+    // Normal next-question request
+    sendNextQuestion();
+  } else if (!isNaN(val)) {
+    // Category change — val is the new category ID
+    currentCategoryId = val;
+    fetchGen++;
     queue = [];
     fetching = false;
     waitingToSend = false;
-    console.log('Category set to: ' + currentCategoryId);
-    sendNextQuestion();
-  } else {
-    // Request next question
+    console.log('Category set to: ' + currentCategoryId + ', fetching...');
     sendNextQuestion();
   }
 });
