@@ -4,6 +4,13 @@
  * Free, no API key required.
  */
 
+// Message keys — must match build/src/message_keys.auto.c
+var KEY_CATEGORY     = 10000;
+var KEY_QUESTION     = 10001;
+var KEY_ANSWER       = 10002;
+var KEY_REQUEST_NEXT = 10003;
+var KEY_SET_CATEGORY = 10004;
+
 var queue = [];
 var fetching = false;
 var waitingToSend = false;
@@ -101,11 +108,11 @@ function sendNextQuestion() {
     doFetch();
   }
 
-  Pebble.sendAppMessage({
-    '0': q.category.substring(0, 63),
-    '1': q.question.substring(0, 510),
-    '2': q.answer.substring(0, 254)
-  }, function() {
+  var payload = {};
+  payload[KEY_CATEGORY] = q.category.substring(0, 63);
+  payload[KEY_QUESTION] = q.question.substring(0, 510);
+  payload[KEY_ANSWER]   = q.answer.substring(0, 254);
+  Pebble.sendAppMessage(payload, function() {
     console.log('Question sent OK');
   }, function(e) {
     console.log('Send failed: ' + JSON.stringify(e));
@@ -117,9 +124,9 @@ Pebble.addEventListener('ready', function() {
 });
 
 Pebble.addEventListener('appmessage', function(e) {
-  if (e.payload[4] !== undefined) {
+  if (e.payload[KEY_SET_CATEGORY] !== undefined) {
     // Category selected — reset and fetch fresh questions
-    currentCategoryId = e.payload[4];
+    currentCategoryId = parseInt(e.payload[KEY_SET_CATEGORY], 10);
     fetchGen++;        // invalidates any in-flight XHR from previous category
     queue = [];
     fetching = false;

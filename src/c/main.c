@@ -10,12 +10,12 @@
 
 #include <pebble.h>
 
-// Message keys — must match package.json
-#define MSG_KEY_CATEGORY     0
-#define MSG_KEY_QUESTION     1
-#define MSG_KEY_ANSWER       2
-#define MSG_KEY_REQUEST_NEXT 3
-#define MSG_KEY_SET_CATEGORY 4
+// Message keys — values from build/src/message_keys.auto.c (array format, base 10000)
+#define MSG_KEY_CATEGORY     10000
+#define MSG_KEY_QUESTION     10001
+#define MSG_KEY_ANSWER       10002
+#define MSG_KEY_REQUEST_NEXT 10003
+#define MSG_KEY_SET_CATEGORY 10004
 
 #define SCROLL_STEP 30
 

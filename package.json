@@ -13,13 +13,13 @@
     "targetPlatforms": ["emery", "basalt", "chalk", "aplite", "diorite"],
     "watchapp": { "watchface": false },
     "capabilities": [],
-    "messageKeys": {
-      "CATEGORY": 0,
-      "QUESTION": 1,
-      "ANSWER": 2,
-      "REQUEST_NEXT": 3,
-      "SET_CATEGORY": 4
-    },
+    "messageKeys": [
+      "CATEGORY",
+      "QUESTION",
+      "ANSWER",
+      "REQUEST_NEXT",
+      "SET_CATEGORY"
+    ],
     "resources": { "media": [] }
   }
 }
