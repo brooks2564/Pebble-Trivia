@@ -8,6 +8,7 @@ var queue = [];
 var fetching = false;
 var waitingToSend = false;
 var currentCategoryId = 0;
+var fetchGen = 0;  // incremented on category change to discard stale XHR responses
 
 function decodeHTML(str) {
   return str
@@ -47,10 +48,15 @@ function buildUrl() {
 function doFetch() {
   if (fetching) return;
   fetching = true;
+  var gen = fetchGen;  // capture generation at time of request
 
   var xhr = new XMLHttpRequest();
   xhr.onload = function() {
     fetching = false;
+    if (gen !== fetchGen) {
+      console.log('Discarding stale fetch (category changed)');
+      return;
+    }
     if (xhr.status === 200) {
       try {
         var data = JSON.parse(xhr.responseText);
@@ -114,6 +120,7 @@ Pebble.addEventListener('appmessage', function(e) {
   if (e.payload[4] !== undefined) {
     // Category selected — reset and fetch fresh questions
     currentCategoryId = e.payload[4];
+    fetchGen++;        // invalidates any in-flight XHR from previous category
     queue = [];
     fetching = false;
     waitingToSend = false;
