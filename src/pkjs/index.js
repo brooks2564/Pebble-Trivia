@@ -6,6 +6,7 @@
 
 var queue = [];
 var fetching = false;
+var waitingToSend = false;
 
 function decodeHTML(str) {
   return str
@@ -32,7 +33,7 @@ function decodeHTML(str) {
     .replace(/&mdash;/g,  '-');
 }
 
-function fetchQuestions(callback) {
+function doFetch() {
   if (fetching) return;
   fetching = true;
 
@@ -56,12 +57,15 @@ function fetchQuestions(callback) {
         console.log('Parse error: ' + e);
       }
     }
-    if (callback) callback();
+    // If the watch was waiting while we fetched, send now
+    if (waitingToSend) {
+      waitingToSend = false;
+      sendNextQuestion();
+    }
   };
   xhr.onerror = function() {
     fetching = false;
     console.log('Fetch failed');
-    if (callback) callback();
   };
   xhr.open('GET', 'https://opentdb.com/api.php?amount=20&type=multiple');
   xhr.send();
@@ -69,7 +73,9 @@ function fetchQuestions(callback) {
 
 function sendNextQuestion() {
   if (queue.length === 0) {
-    fetchQuestions(sendNextQuestion);
+    // No questions yet — fetch and send once done
+    waitingToSend = true;
+    doFetch();
     return;
   }
 
@@ -77,28 +83,26 @@ function sendNextQuestion() {
 
   // Prefetch in background when running low
   if (queue.length < 5) {
-    fetchQuestions(null);
+    doFetch();
   }
 
-  var payload = {
+  Pebble.sendAppMessage({
     '0': q.category.substring(0, 63),
     '1': q.question.substring(0, 510),
     '2': q.answer.substring(0, 254)
-  };
-
-  Pebble.sendAppMessage(payload,
-    function() { console.log('Question sent OK'); },
-    function(e) { console.log('Send failed: ' + JSON.stringify(e)); }
-  );
+  }, function() {
+    console.log('Question sent OK');
+  }, function(e) {
+    console.log('Send failed: ' + JSON.stringify(e));
+  });
 }
 
 Pebble.addEventListener('ready', function() {
-  console.log('JS ready, fetching questions...');
-  fetchQuestions(sendNextQuestion);
+  console.log('JS ready, fetching first question...');
+  sendNextQuestion(); // queue empty on start, triggers fetch
 });
 
-Pebble.addEventListener('appmessage', function(e) {
-  if (e.payload['3'] === 1) {
-    sendNextQuestion();
-  }
+Pebble.addEventListener('appmessage', function() {
+  // Any message from the watch means "send next question"
+  sendNextQuestion();
 });
