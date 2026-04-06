@@ -1,10 +1,11 @@
 /**
  * Pebble Trivia
  *
+ * Start screen lets you pick a category.
  * UP/DOWN — scroll question or answer text
  * SELECT  — reveal answer / load next question
  *
- * Questions provided by Open Trivia Database (opentdb.com) — free, no API key.
+ * Questions from Open Trivia Database (opentdb.com) — free, no API key.
  */
 
 #include <pebble.h>
@@ -14,6 +15,7 @@
 #define MSG_KEY_QUESTION     1
 #define MSG_KEY_ANSWER       2
 #define MSG_KEY_REQUEST_NEXT 3
+#define MSG_KEY_SET_CATEGORY 4
 
 #define SCROLL_STEP 30
 
@@ -23,11 +25,95 @@ typedef enum {
   STATE_ANSWER,
 } AppState;
 
-static Window      *s_window;
-static TextLayer   *s_label_layer;   // top bar: category or "ANSWER"
-static ScrollLayer *s_scroll_layer;  // scrollable content area
-static TextLayer   *s_main_layer;    // question or answer text (inside scroll)
-static TextLayer   *s_hint_layer;    // bottom bar: button hint
+// ── Category Data ─────────────────────────────────────────────
+
+typedef struct {
+  const char *name;
+  uint8_t id;   // OpenTDB category ID; 0 = all; 101 = easy/kids
+} Category;
+
+static const Category CATEGORIES[] = {
+  { "All Topics",      0  },
+  { "General",         9  },
+  { "Geography",       22 },
+  { "History",         23 },
+  { "Science",         17 },
+  { "Entertainment",   11 },
+  { "Sports",          21 },
+  { "Animals",         27 },
+  { "Easy (Kids)",     101 },
+};
+#define NUM_CATEGORIES 9
+
+// ── Category Menu Window ──────────────────────────────────────
+
+static Window    *s_menu_window;
+static MenuLayer *s_menu_layer;
+
+// forward declarations
+static void trivia_window_push(void);
+static void update_display(void);
+
+static uint16_t menu_num_sections(MenuLayer *l, void *ctx) { return 1; }
+static uint16_t menu_num_rows(MenuLayer *l, uint16_t sec, void *ctx) {
+  return NUM_CATEGORIES;
+}
+static int16_t menu_cell_height(MenuLayer *l, MenuIndex *idx, void *ctx) {
+  return 36;
+}
+static void menu_draw_header(GContext *ctx, const Layer *cell_layer,
+                              uint16_t sec, void *ctx2) {
+  menu_cell_basic_header_draw(ctx, cell_layer, "Choose Category");
+}
+static int16_t menu_header_height(MenuLayer *l, uint16_t sec, void *ctx) {
+  return 16;
+}
+static void menu_draw_row(GContext *ctx, const Layer *cell_layer,
+                           MenuIndex *idx, void *ctx2) {
+  menu_cell_basic_draw(ctx, cell_layer, CATEGORIES[idx->row].name, NULL, NULL);
+}
+static void menu_select(MenuLayer *l, MenuIndex *idx, void *ctx) {
+  uint8_t cat_id = CATEGORIES[idx->row].id;
+
+  // Tell JS which category to use
+  DictionaryIterator *iter;
+  if (app_message_outbox_begin(&iter) == APP_MSG_OK) {
+    dict_write_uint8(iter, MSG_KEY_SET_CATEGORY, cat_id);
+    app_message_outbox_send();
+  }
+
+  trivia_window_push();
+}
+
+static void menu_window_load(Window *window) {
+  Layer *root = window_get_root_layer(window);
+  GRect bounds = layer_get_bounds(root);
+
+  s_menu_layer = menu_layer_create(bounds);
+  menu_layer_set_callbacks(s_menu_layer, NULL, (MenuLayerCallbacks){
+    .get_num_sections  = menu_num_sections,
+    .get_num_rows      = menu_num_rows,
+    .get_cell_height   = menu_cell_height,
+    .get_header_height = menu_header_height,
+    .draw_header       = menu_draw_header,
+    .draw_row          = menu_draw_row,
+    .select_click      = menu_select,
+  });
+  menu_layer_set_click_config_onto_window(s_menu_layer, window);
+  layer_add_child(root, menu_layer_get_layer(s_menu_layer));
+}
+
+static void menu_window_unload(Window *window) {
+  menu_layer_destroy(s_menu_layer);
+}
+
+// ── Trivia Window ─────────────────────────────────────────────
+
+static Window      *s_trivia_window;
+static TextLayer   *s_label_layer;
+static ScrollLayer *s_scroll_layer;
+static TextLayer   *s_main_layer;
+static TextLayer   *s_hint_layer;
 
 static AppState s_state = STATE_LOADING;
 
@@ -35,32 +121,25 @@ static char s_category[64];
 static char s_question[512];
 static char s_answer[256];
 
-// ── Scroll Helpers ─────────────────────────────────────────────
-
 static void set_scroll_text(const char *text) {
+  if (!s_scroll_layer) return;
   GRect scroll_frame = layer_get_frame(scroll_layer_get_layer(s_scroll_layer));
   int content_w = scroll_frame.size.w - 8;
 
-  // Size the TextLayer tall enough to measure full content
   text_layer_set_size(s_main_layer, GSize(content_w, 2000));
   text_layer_set_text(s_main_layer, text);
 
-  // Measure actual height needed
   GSize text_size = text_layer_get_content_size(s_main_layer);
   int content_h = text_size.h + 8;
   if (content_h < scroll_frame.size.h) content_h = scroll_frame.size.h;
 
-  // Resize and update scroll content size
   text_layer_set_size(s_main_layer, GSize(content_w, content_h));
   scroll_layer_set_content_size(s_scroll_layer, GSize(scroll_frame.size.w, content_h));
-
-  // Always reset to top
   scroll_layer_set_content_offset(s_scroll_layer, GPoint(0, 0), false);
 }
 
-// ── Display ────────────────────────────────────────────────────
-
 static void update_display(void) {
+  if (!s_scroll_layer) return;
   switch (s_state) {
     case STATE_LOADING:
       text_layer_set_text(s_label_layer, "TRIVIA");
@@ -79,8 +158,6 @@ static void update_display(void) {
       break;
   }
 }
-
-// ── Button Handlers ────────────────────────────────────────────
 
 static void up_click(ClickRecognizerRef recognizer, void *context) {
   GPoint offset = scroll_layer_get_content_offset(s_scroll_layer);
@@ -125,10 +202,64 @@ static void select_click(ClickRecognizerRef recognizer, void *context) {
   }
 }
 
-static void click_config_provider(void *context) {
+static void trivia_click_config_provider(void *context) {
   window_single_repeating_click_subscribe(BUTTON_ID_UP,   150, up_click);
   window_single_repeating_click_subscribe(BUTTON_ID_DOWN, 150, down_click);
   window_single_click_subscribe(BUTTON_ID_SELECT, select_click);
+}
+
+static void trivia_window_load(Window *window) {
+  Layer *root  = window_get_root_layer(window);
+  GRect bounds = layer_get_bounds(root);
+  int w = bounds.size.w;
+  int h = bounds.size.h;
+
+#ifdef PBL_COLOR
+  window_set_background_color(window, GColorWhite);
+#endif
+
+  s_label_layer = text_layer_create(GRect(0, 0, w, 22));
+  text_layer_set_background_color(s_label_layer, GColorBlack);
+  text_layer_set_text_color(s_label_layer, GColorWhite);
+  text_layer_set_font(s_label_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD));
+  text_layer_set_text_alignment(s_label_layer, GTextAlignmentCenter);
+  text_layer_set_overflow_mode(s_label_layer, GTextOverflowModeTrailingEllipsis);
+  layer_add_child(root, text_layer_get_layer(s_label_layer));
+
+  GRect scroll_rect = GRect(0, 24, w, h - 44);
+  s_scroll_layer = scroll_layer_create(scroll_rect);
+  scroll_layer_set_shadow_hidden(s_scroll_layer, true);
+  layer_add_child(root, scroll_layer_get_layer(s_scroll_layer));
+
+  s_main_layer = text_layer_create(GRect(4, 2, w - 8, scroll_rect.size.h));
+  text_layer_set_background_color(s_main_layer, GColorClear);
+  text_layer_set_text_color(s_main_layer, GColorBlack);
+  text_layer_set_font(s_main_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD));
+  text_layer_set_overflow_mode(s_main_layer, GTextOverflowModeWordWrap);
+  scroll_layer_add_child(s_scroll_layer, text_layer_get_layer(s_main_layer));
+
+  s_hint_layer = text_layer_create(GRect(0, h - 20, w, 20));
+  text_layer_set_background_color(s_hint_layer, GColorBlack);
+  text_layer_set_text_color(s_hint_layer, GColorWhite);
+  text_layer_set_font(s_hint_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
+  text_layer_set_text_alignment(s_hint_layer, GTextAlignmentCenter);
+  layer_add_child(root, text_layer_get_layer(s_hint_layer));
+
+  s_state = STATE_LOADING;
+  update_display();
+}
+
+static void trivia_window_unload(Window *window) {
+  text_layer_destroy(s_label_layer);
+  text_layer_destroy(s_main_layer);
+  scroll_layer_destroy(s_scroll_layer);
+  text_layer_destroy(s_hint_layer);
+  s_scroll_layer = NULL;
+  s_main_layer   = NULL;
+}
+
+static void trivia_window_push(void) {
+  window_stack_push(s_trivia_window, true);
 }
 
 // ── AppMessage ────────────────────────────────────────────────
@@ -138,9 +269,9 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
   Tuple *q_t    = dict_find(iter, MSG_KEY_QUESTION);
   Tuple *ans_t  = dict_find(iter, MSG_KEY_ANSWER);
 
-  if (cat_t)  strncpy(s_category, cat_t->value->cstring,  sizeof(s_category) - 1);
-  if (q_t)    strncpy(s_question, q_t->value->cstring,    sizeof(s_question) - 1);
-  if (ans_t)  strncpy(s_answer,   ans_t->value->cstring,  sizeof(s_answer) - 1);
+  if (cat_t)  strncpy(s_category, cat_t->value->cstring, sizeof(s_category) - 1);
+  if (q_t)    strncpy(s_question, q_t->value->cstring,   sizeof(s_question) - 1);
+  if (ans_t)  strncpy(s_answer,   ans_t->value->cstring, sizeof(s_answer) - 1);
 
   if (q_t) {
     s_state = STATE_QUESTION;
@@ -152,59 +283,6 @@ static void inbox_dropped(AppMessageResult reason, void *context) {
   APP_LOG(APP_LOG_LEVEL_ERROR, "Message dropped: %d", (int)reason);
 }
 
-// ── Window Lifecycle ───────────────────────────────────────────
-
-static void window_load(Window *window) {
-  Layer *root  = window_get_root_layer(window);
-  GRect bounds = layer_get_bounds(root);
-  int w = bounds.size.w;
-  int h = bounds.size.h;
-
-#ifdef PBL_COLOR
-  window_set_background_color(window, GColorWhite);
-#endif
-
-  // Top label bar
-  s_label_layer = text_layer_create(GRect(0, 0, w, 22));
-  text_layer_set_background_color(s_label_layer, GColorBlack);
-  text_layer_set_text_color(s_label_layer, GColorWhite);
-  text_layer_set_font(s_label_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD));
-  text_layer_set_text_alignment(s_label_layer, GTextAlignmentCenter);
-  text_layer_set_overflow_mode(s_label_layer, GTextOverflowModeTrailingEllipsis);
-  layer_add_child(root, text_layer_get_layer(s_label_layer));
-
-  // Scrollable content area
-  GRect scroll_rect = GRect(0, 24, w, h - 44);
-  s_scroll_layer = scroll_layer_create(scroll_rect);
-  scroll_layer_set_shadow_hidden(s_scroll_layer, true);
-  layer_add_child(root, scroll_layer_get_layer(s_scroll_layer));
-
-  // TextLayer inside the scroll layer
-  s_main_layer = text_layer_create(GRect(4, 2, w - 8, scroll_rect.size.h));
-  text_layer_set_background_color(s_main_layer, GColorClear);
-  text_layer_set_text_color(s_main_layer, GColorBlack);
-  text_layer_set_font(s_main_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD));
-  text_layer_set_overflow_mode(s_main_layer, GTextOverflowModeWordWrap);
-  scroll_layer_add_child(s_scroll_layer, text_layer_get_layer(s_main_layer));
-
-  // Bottom hint bar
-  s_hint_layer = text_layer_create(GRect(0, h - 20, w, 20));
-  text_layer_set_background_color(s_hint_layer, GColorBlack);
-  text_layer_set_text_color(s_hint_layer, GColorWhite);
-  text_layer_set_font(s_hint_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
-  text_layer_set_text_alignment(s_hint_layer, GTextAlignmentCenter);
-  layer_add_child(root, text_layer_get_layer(s_hint_layer));
-
-  update_display();
-}
-
-static void window_unload(Window *window) {
-  text_layer_destroy(s_label_layer);
-  text_layer_destroy(s_main_layer);
-  scroll_layer_destroy(s_scroll_layer);
-  text_layer_destroy(s_hint_layer);
-}
-
 // ── Main ──────────────────────────────────────────────────────
 
 static void init(void) {
@@ -212,17 +290,26 @@ static void init(void) {
   app_message_register_inbox_dropped(inbox_dropped);
   app_message_open(512, 64);
 
-  s_window = window_create();
-  window_set_window_handlers(s_window, (WindowHandlers){
-    .load   = window_load,
-    .unload = window_unload,
+  // Trivia window (not pushed yet)
+  s_trivia_window = window_create();
+  window_set_window_handlers(s_trivia_window, (WindowHandlers){
+    .load   = trivia_window_load,
+    .unload = trivia_window_unload,
   });
-  window_set_click_config_provider(s_window, click_config_provider);
-  window_stack_push(s_window, true);
+  window_set_click_config_provider(s_trivia_window, trivia_click_config_provider);
+
+  // Category menu window (pushed first)
+  s_menu_window = window_create();
+  window_set_window_handlers(s_menu_window, (WindowHandlers){
+    .load   = menu_window_load,
+    .unload = menu_window_unload,
+  });
+  window_stack_push(s_menu_window, true);
 }
 
 static void deinit(void) {
-  window_destroy(s_window);
+  window_destroy(s_trivia_window);
+  window_destroy(s_menu_window);
 }
 
 int main(void) {

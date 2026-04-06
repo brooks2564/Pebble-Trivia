@@ -7,6 +7,7 @@
 var queue = [];
 var fetching = false;
 var waitingToSend = false;
+var currentCategoryId = 0;
 
 function decodeHTML(str) {
   return str
@@ -33,6 +34,16 @@ function decodeHTML(str) {
     .replace(/&mdash;/g,  '-');
 }
 
+function buildUrl() {
+  var base = 'https://opentdb.com/api.php?amount=20&type=multiple';
+  if (currentCategoryId === 101) {
+    return base + '&difficulty=easy';
+  } else if (currentCategoryId > 0) {
+    return base + '&category=' + currentCategoryId;
+  }
+  return base;
+}
+
 function doFetch() {
   if (fetching) return;
   fetching = true;
@@ -57,7 +68,6 @@ function doFetch() {
         console.log('Parse error: ' + e);
       }
     }
-    // If the watch was waiting while we fetched, send now
     if (waitingToSend) {
       waitingToSend = false;
       sendNextQuestion();
@@ -67,13 +77,12 @@ function doFetch() {
     fetching = false;
     console.log('Fetch failed');
   };
-  xhr.open('GET', 'https://opentdb.com/api.php?amount=20&type=multiple');
+  xhr.open('GET', buildUrl());
   xhr.send();
 }
 
 function sendNextQuestion() {
   if (queue.length === 0) {
-    // No questions yet — fetch and send once done
     waitingToSend = true;
     doFetch();
     return;
@@ -98,11 +107,20 @@ function sendNextQuestion() {
 }
 
 Pebble.addEventListener('ready', function() {
-  console.log('JS ready, fetching first question...');
-  sendNextQuestion(); // queue empty on start, triggers fetch
+  console.log('JS ready — waiting for category selection');
 });
 
-Pebble.addEventListener('appmessage', function() {
-  // Any message from the watch means "send next question"
-  sendNextQuestion();
+Pebble.addEventListener('appmessage', function(e) {
+  if (e.payload[4] !== undefined) {
+    // Category selected — reset and fetch fresh questions
+    currentCategoryId = e.payload[4];
+    queue = [];
+    fetching = false;
+    waitingToSend = false;
+    console.log('Category set to: ' + currentCategoryId);
+    sendNextQuestion();
+  } else {
+    // Request next question
+    sendNextQuestion();
+  }
 });

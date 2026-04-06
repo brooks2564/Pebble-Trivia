@@ -17,7 +17,8 @@
       "CATEGORY": 0,
       "QUESTION": 1,
       "ANSWER": 2,
-      "REQUEST_NEXT": 3
+      "REQUEST_NEXT": 3,
+      "SET_CATEGORY": 4
     },
     "resources": { "media": [] }
   }
