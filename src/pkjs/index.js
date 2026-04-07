@@ -22,6 +22,9 @@ var waitingToSend = false;
 var currentCatId  = 0;
 var currentDiff   = 0;   // 0=any 1=easy 2=medium 3=hard
 var fetchGen      = 0;   // incremented on category change to discard stale XHRs
+var lastFetchTime = 0;   // ms timestamp of last XHR send (rate-limit guard)
+var FETCH_INTERVAL = 5500;  // OpenTDB allows 1 request per 5 seconds per IP
+var skipDiff      = false;  // set true after response_code 1 to drop difficulty filter
 
 function decodeHTML(str) {
   return str
@@ -50,9 +53,11 @@ function decodeHTML(str) {
 
 function buildUrl() {
   var diff = '';
-  if (currentDiff === 1)      diff = '&difficulty=easy';
-  else if (currentDiff === 2) diff = '&difficulty=medium';
-  else if (currentDiff === 3) diff = '&difficulty=hard';
+  if (!skipDiff) {
+    if (currentDiff === 1)      diff = '&difficulty=easy';
+    else if (currentDiff === 2) diff = '&difficulty=medium';
+    else if (currentDiff === 3) diff = '&difficulty=hard';
+  }
 
   if (currentCatId === 102) {
     // True / False category
@@ -69,8 +74,30 @@ function buildUrl() {
   return base;
 }
 
+function scheduleRetry(delayMs, gen) {
+  setTimeout(function() {
+    if (gen !== fetchGen) return;
+    fetching = false;
+    doFetch();
+  }, delayMs);
+}
+
 function doFetch() {
   if (fetching) return;
+
+  // Respect OpenTDB's 5-second rate limit
+  var now = Date.now();
+  var elapsed = now - lastFetchTime;
+  if (lastFetchTime > 0 && elapsed < FETCH_INTERVAL) {
+    var wait = FETCH_INTERVAL - elapsed;
+    console.log('Rate-limit guard: waiting ' + wait + 'ms');
+    var guardGen = fetchGen;
+    setTimeout(function() {
+      if (guardGen === fetchGen) doFetch();
+    }, wait);
+    return;
+  }
+
   fetching = true;
   var gen = fetchGen;
 
@@ -84,7 +111,7 @@ function doFetch() {
     if (xhr.status === 200) {
       try {
         var data = JSON.parse(xhr.responseText);
-        if (data.response_code === 0 && data.results) {
+        if (data.response_code === 0 && data.results && data.results.length > 0) {
           data.results.forEach(function(q) {
             var correct      = decodeHTML(q.correct_answer);
             var questionText = decodeHTML(q.question);
@@ -116,10 +143,29 @@ function doFetch() {
           });
           console.log('Fetched ' + data.results.length +
                       ' questions. Queue: ' + queue.length);
+        } else if (data.response_code === 5) {
+          // Rate limited — wait 6 seconds and retry
+          console.log('Rate limited by OpenTDB, retrying in 6s');
+          scheduleRetry(6000, gen);
+          return;
+        } else if (data.response_code === 1) {
+          // No results — category+difficulty combo has too few questions
+          // Drop the difficulty filter and retry
+          console.log('No results (code 1), retrying without difficulty filter');
+          skipDiff = true;
+          scheduleRetry(500, gen);
+          return;
+        } else {
+          console.log('OpenTDB response_code: ' + data.response_code);
         }
       } catch(e) {
         console.log('Parse error: ' + e);
       }
+    } else {
+      // HTTP error — retry after a short delay
+      console.log('HTTP error ' + xhr.status + ', retrying in 3s');
+      scheduleRetry(3000, gen);
+      return;
     }
     if (waitingToSend) {
       waitingToSend = false;
@@ -128,8 +174,10 @@ function doFetch() {
   };
   xhr.onerror = function() {
     fetching = false;
-    console.log('Fetch error');
+    console.log('Network error, retrying in 3s');
+    scheduleRetry(3000, gen);
   };
+  lastFetchTime = Date.now();
   xhr.open('GET', buildUrl());
   xhr.send();
 }
@@ -172,6 +220,7 @@ Pebble.addEventListener('appmessage', function(e) {
     queue         = [];
     fetching      = false;
     waitingToSend = false;
+    skipDiff      = false;
     console.log('Cat: ' + currentCatId + '  Diff: ' + currentDiff);
     sendNextQuestion();
   }
