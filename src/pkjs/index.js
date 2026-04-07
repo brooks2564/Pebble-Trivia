@@ -2,21 +2,26 @@
  * Pebble Trivia — PebbleKit JS
  * Fetches questions from Open Trivia Database (opentdb.com)
  * Free, no API key required.
+ *
+ * Encoding received from watch:
+ *   value = 1                   → send next question
+ *   value = cat_id + diff*200   → category/difficulty change
+ *     diff: 0=any 1=easy 2=medium 3=hard
+ *     cat_id 102 = True/False (type=boolean)
+ *     cat_id 101 = Easy Kids  (always easy, type=multiple)
  */
 
-// Message keys — must match package.json dict values (0-3)
-var KEY_CATEGORY     = 0;
-var KEY_QUESTION     = 1;
-var KEY_ANSWER       = 2;
-var KEY_REQUEST_NEXT = 3;
-// Protocol: REQUEST_NEXT value=1 → send next question
-//           REQUEST_NEXT value=anything else → switch to that category ID
+var KEY_CATEGORY     = 'CATEGORY';
+var KEY_QUESTION     = 'QUESTION';
+var KEY_ANSWER       = 'ANSWER';
+var KEY_REQUEST_NEXT = 'REQUEST_NEXT';
 
-var queue = [];
-var fetching = false;
+var queue         = [];
+var fetching      = false;
 var waitingToSend = false;
-var currentCategoryId = 0;
-var fetchGen = 0;  // incremented on category change to discard stale XHR responses
+var currentCatId  = 0;
+var currentDiff   = 0;   // 0=any 1=easy 2=medium 3=hard
+var fetchGen      = 0;   // incremented on category change to discard stale XHRs
 
 function decodeHTML(str) {
   return str
@@ -44,11 +49,22 @@ function decodeHTML(str) {
 }
 
 function buildUrl() {
-  var base = 'https://opentdb.com/api.php?amount=20&type=multiple';
-  if (currentCategoryId === 101) {
-    return base + '&difficulty=easy';
-  } else if (currentCategoryId > 0) {
-    return base + '&category=' + currentCategoryId;
+  var diff = '';
+  if (currentDiff === 1)      diff = '&difficulty=easy';
+  else if (currentDiff === 2) diff = '&difficulty=medium';
+  else if (currentDiff === 3) diff = '&difficulty=hard';
+
+  if (currentCatId === 102) {
+    // True / False category
+    return 'https://opentdb.com/api.php?amount=20&type=boolean' + diff;
+  }
+  if (currentCatId === 101) {
+    // Easy (Kids) — always easy multiple-choice regardless of difficulty picker
+    return 'https://opentdb.com/api.php?amount=20&type=multiple&difficulty=easy';
+  }
+  var base = 'https://opentdb.com/api.php?amount=20&type=multiple' + diff;
+  if (currentCatId > 0) {
+    return base + '&category=' + currentCatId;
   }
   return base;
 }
@@ -56,7 +72,7 @@ function buildUrl() {
 function doFetch() {
   if (fetching) return;
   fetching = true;
-  var gen = fetchGen;  // capture generation at time of request
+  var gen = fetchGen;
 
   var xhr = new XMLHttpRequest();
   xhr.onload = function() {
@@ -70,13 +86,36 @@ function doFetch() {
         var data = JSON.parse(xhr.responseText);
         if (data.response_code === 0 && data.results) {
           data.results.forEach(function(q) {
+            var correct      = decodeHTML(q.correct_answer);
+            var questionText = decodeHTML(q.question);
+
+            if (q.type === 'boolean') {
+              // True/False — always the same two options
+              questionText += '\nA) True\nB) False';
+            } else {
+              // Multiple choice — shuffle all four options
+              var choices = q.incorrect_answers.map(function(a) {
+                return decodeHTML(a);
+              });
+              choices.push(correct);
+              for (var i = choices.length - 1; i > 0; i--) {
+                var j = Math.floor(Math.random() * (i + 1));
+                var tmp = choices[i]; choices[i] = choices[j]; choices[j] = tmp;
+              }
+              var labels = ['A', 'B', 'C', 'D'];
+              questionText += '\n' + choices.map(function(c, idx) {
+                return labels[idx] + ') ' + c;
+              }).join('\n');
+            }
+
             queue.push({
               category: decodeHTML(q.category),
-              question: decodeHTML(q.question),
-              answer:   decodeHTML(q.correct_answer)
+              question: questionText,
+              answer:   correct
             });
           });
-          console.log('Fetched ' + data.results.length + ' questions. Queue: ' + queue.length);
+          console.log('Fetched ' + data.results.length +
+                      ' questions. Queue: ' + queue.length);
         }
       } catch(e) {
         console.log('Parse error: ' + e);
@@ -89,7 +128,7 @@ function doFetch() {
   };
   xhr.onerror = function() {
     fetching = false;
-    console.log('Fetch failed');
+    console.log('Fetch error');
   };
   xhr.open('GET', buildUrl());
   xhr.send();
@@ -103,11 +142,7 @@ function sendNextQuestion() {
   }
 
   var q = queue.shift();
-
-  // Prefetch in background when running low
-  if (queue.length < 5) {
-    doFetch();
-  }
+  if (queue.length < 5) doFetch();  // prefetch in background
 
   var payload = {};
   payload[KEY_CATEGORY] = q.category.substring(0, 63);
@@ -125,18 +160,19 @@ Pebble.addEventListener('ready', function() {
 });
 
 Pebble.addEventListener('appmessage', function(e) {
-  var val = parseInt(e.payload[KEY_REQUEST_NEXT], 10);
-  if (val === 1) {
-    // Normal next-question request
+  var raw = parseInt(e.payload[KEY_REQUEST_NEXT], 10);
+  if (raw === 1) {
+    // Next question request
     sendNextQuestion();
-  } else if (!isNaN(val)) {
-    // Category change — val is the new category ID
-    currentCategoryId = val;
+  } else if (!isNaN(raw)) {
+    // Category + difficulty change
+    currentDiff  = Math.floor(raw / 200);
+    currentCatId = raw % 200;
     fetchGen++;
-    queue = [];
-    fetching = false;
+    queue         = [];
+    fetching      = false;
     waitingToSend = false;
-    console.log('Category set to: ' + currentCategoryId + ', fetching...');
+    console.log('Cat: ' + currentCatId + '  Diff: ' + currentDiff);
     sendNextQuestion();
   }
 });
