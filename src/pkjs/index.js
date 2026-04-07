@@ -4,11 +4,11 @@
  * Free, no API key required.
  */
 
-// Message keys — must match build/src/message_keys.auto.c
-var KEY_CATEGORY     = 10000;
-var KEY_QUESTION     = 10001;
-var KEY_ANSWER       = 10002;
-var KEY_REQUEST_NEXT = 10003;
+// Message keys — must match package.json dict values (0-3)
+var KEY_CATEGORY     = 0;
+var KEY_QUESTION     = 1;
+var KEY_ANSWER       = 2;
+var KEY_REQUEST_NEXT = 3;
 // Protocol: REQUEST_NEXT value=1 → send next question
 //           REQUEST_NEXT value=anything else → switch to that category ID
 
