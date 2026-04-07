@@ -2,7 +2,9 @@
   "name": "pebble-trivia",
   "author": "brooks2564",
   "version": "1.0.0",
-  "keywords": ["pebble-app"],
+  "keywords": [
+    "pebble-app"
+  ],
   "private": true,
   "dependencies": {},
   "pebble": {
@@ -10,8 +12,18 @@
     "uuid": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
     "sdkVersion": "3",
     "enableMultiJS": true,
-    "targetPlatforms": ["emery", "basalt", "chalk", "aplite", "diorite"],
-    "watchapp": { "watchface": false },
+    "targetPlatforms": [
+      "aplite",
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery",
+      "flint",
+      "gabbro"
+    ],
+    "watchapp": {
+      "watchface": false
+    },
     "capabilities": [],
     "messageKeys": {
       "CATEGORY": 0,
@@ -19,6 +31,8 @@
       "ANSWER": 2,
       "REQUEST_NEXT": 3
     },
-    "resources": { "media": [] }
+    "resources": {
+      "media": []
+    }
   }
 }
