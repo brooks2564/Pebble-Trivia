@@ -9,7 +9,7 @@
   "dependencies": {},
   "pebble": {
     "displayName": "Trivia",
-    "uuid": "f550f965-fb5a-4ecd-ab61-f8b267824769",
+    "uuid": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
     "sdkVersion": "3",
     "enableMultiJS": true,
     "targetPlatforms": [
