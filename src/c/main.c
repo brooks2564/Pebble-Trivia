@@ -9,6 +9,11 @@
  *
  * Difficulty encoding: message value = cat_id + difficulty * 200
  * (no valid cat_id == 1, so REQUEST_NEXT=1 is unambiguous)
+ *
+ * Touch (emery/gabbro only):
+ *   Tap              = reveal answer (STATE_QUESTION) or skip (STATE_ANSWER)
+ *   Swipe up (dy<0)  = correct (STATE_ANSWER)
+ *   Swipe down(dy>0) = missed  (STATE_ANSWER)
  */
 
 #include <pebble.h>
@@ -21,6 +26,17 @@
 #define REQUEST_NEXT         1   /* value=1 → next question */
 
 #define SCROLL_STEP 30
+
+/* Touch guard — emery and gabbro only */
+#if defined(PBL_PLATFORM_EMERY) || defined(PBL_PLATFORM_GABBRO)
+#define HAS_TOUCHSCREEN
+#endif
+
+#ifdef HAS_TOUCHSCREEN
+#define SWIPE_THRESHOLD 20   /* px of vertical travel to count as swipe */
+static GPoint s_touch_start;
+static bool   s_touch_active = false;
+#endif
 
 /* ── Layout ────────────────────────────────────────────────── */
 #ifdef PBL_ROUND
@@ -247,8 +263,10 @@ static ScrollLayer *s_scroll_layer;
 static TextLayer   *s_main_layer;
 static TextLayer   *s_hint_layer;
 
-static AppState s_state  = STATE_LOADING;
-static int      s_streak = 0;
+static AppState s_state         = STATE_LOADING;
+static int      s_streak        = 0;
+static int      s_session_right = 0;
+static int      s_session_total = 0;
 static char     s_category[64];
 static char     s_question[512];
 static char     s_answer[256];
@@ -293,30 +311,52 @@ static void update_display(void) {
 
     case STATE_QUESTION:
       apply_cat_color();
-      if (s_streak > 0)
-        snprintf(s_label_buf, sizeof(s_label_buf),
-                 "%s  x%d", s_category, s_streak);
-      else
+      if (s_session_total > 0) {
+        if (s_streak > 0)
+          snprintf(s_label_buf, sizeof(s_label_buf),
+                   "%s  %d/%d x%d", s_category,
+                   s_session_right, s_session_total, s_streak);
+        else
+          snprintf(s_label_buf, sizeof(s_label_buf),
+                   "%s  %d/%d", s_category,
+                   s_session_right, s_session_total);
+      } else {
         snprintf(s_label_buf, sizeof(s_label_buf), "%s", s_category);
+      }
       text_layer_set_text(s_label_layer, s_label_buf);
       text_layer_set_font(s_main_layer,
         fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD));
       set_scroll_text(s_question);
+#ifdef HAS_TOUCHSCREEN
+      text_layer_set_text(s_hint_layer, "TAP=reveal");
+#else
       text_layer_set_text(s_hint_layer, "SEL=reveal answer");
+#endif
       break;
 
     case STATE_ANSWER:
       apply_cat_color();
-      if (s_streak > 0)
-        snprintf(s_label_buf, sizeof(s_label_buf),
-                 "ANSWER  x%d", s_streak);
-      else
+      if (s_session_total > 0) {
+        if (s_streak > 0)
+          snprintf(s_label_buf, sizeof(s_label_buf),
+                   "ANSWER  %d/%d x%d",
+                   s_session_right, s_session_total, s_streak);
+        else
+          snprintf(s_label_buf, sizeof(s_label_buf),
+                   "ANSWER  %d/%d",
+                   s_session_right, s_session_total);
+      } else {
         snprintf(s_label_buf, sizeof(s_label_buf), "ANSWER");
+      }
       text_layer_set_text(s_label_layer, s_label_buf);
       text_layer_set_font(s_main_layer,
         fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD));
       set_scroll_text(s_answer);
+#ifdef HAS_TOUCHSCREEN
+      text_layer_set_text(s_hint_layer, "swipe UP/DN or UP/DN btn");
+#else
       text_layer_set_text(s_hint_layer, "UP=correct  DN=missed");
+#endif
       break;
   }
 }
@@ -324,17 +364,29 @@ static void update_display(void) {
 static void request_next(void) {
   DictionaryIterator *it;
   if (app_message_outbox_begin(&it) == APP_MSG_OK) {
-    dict_write_uint8(it, MSG_KEY_REQUEST_NEXT, REQUEST_NEXT);
+    dict_write_int32(it, MSG_KEY_REQUEST_NEXT, REQUEST_NEXT);
     app_message_outbox_send();
   }
   s_state = STATE_LOADING;
   update_display();
 }
 
+static void mark_correct(void) {
+  s_streak++;
+  s_session_right++;
+  s_session_total++;
+  request_next();
+}
+
+static void mark_missed(void) {
+  s_streak = 0;
+  s_session_total++;
+  request_next();
+}
+
 static void up_click(ClickRecognizerRef r, void *ctx) {
   if (s_state == STATE_ANSWER) {
-    s_streak++;
-    request_next();
+    mark_correct();
   } else {
     GPoint off = scroll_layer_get_content_offset(s_scroll_layer);
     off.y += SCROLL_STEP;
@@ -345,8 +397,7 @@ static void up_click(ClickRecognizerRef r, void *ctx) {
 
 static void down_click(ClickRecognizerRef r, void *ctx) {
   if (s_state == STATE_ANSWER) {
-    s_streak = 0;
-    request_next();
+    mark_missed();
   } else {
     GPoint off = scroll_layer_get_content_offset(s_scroll_layer);
     GSize  cs  = scroll_layer_get_content_size(s_scroll_layer);
@@ -372,6 +423,34 @@ static void select_click(ClickRecognizerRef r, void *ctx) {
       break;
   }
 }
+
+#ifdef HAS_TOUCHSCREEN
+static void touch_handler(const TouchEvent *event, void *ctx) {
+  if (!s_scroll_layer) return;
+  switch (event->type) {
+    case TouchEvent_Touchdown:
+      s_touch_start.x = event->x;
+      s_touch_start.y = event->y;
+      s_touch_active  = true;
+      break;
+    case TouchEvent_Liftoff: {
+      if (!s_touch_active) break;
+      s_touch_active = false;
+      int dy = (int)event->y - (int)s_touch_start.y;
+      if (dy < -SWIPE_THRESHOLD && s_state == STATE_ANSWER) {
+        mark_correct();   /* swipe up = correct */
+      } else if (dy > SWIPE_THRESHOLD && s_state == STATE_ANSWER) {
+        mark_missed();    /* swipe down = missed */
+      } else if (dy > -SWIPE_THRESHOLD && dy < SWIPE_THRESHOLD) {
+        select_click(NULL, ctx);
+      }
+      break;
+    }
+    default:
+      break;
+  }
+}
+#endif
 
 static void click_config(void *ctx) {
   window_single_repeating_click_subscribe(BUTTON_ID_UP,   150, up_click);
@@ -422,9 +501,15 @@ static void trivia_win_load(Window *w) {
 
   s_state = STATE_LOADING;
   update_display();
+#ifdef HAS_TOUCHSCREEN
+  touch_service_subscribe(touch_handler, NULL);
+#endif
 }
 
 static void trivia_win_unload(Window *w) {
+#ifdef HAS_TOUCHSCREEN
+  touch_service_unsubscribe();
+#endif
   text_layer_destroy(s_label_layer);
   text_layer_destroy(s_main_layer);
   scroll_layer_destroy(s_scroll_layer);
@@ -434,8 +519,10 @@ static void trivia_win_unload(Window *w) {
   s_label_layer  = NULL;
   s_hint_layer   = NULL;
   /* Reset state so next game starts clean */
-  s_state  = STATE_LOADING;
-  s_streak = 0;
+  s_state         = STATE_LOADING;
+  s_streak        = 0;
+  s_session_right = 0;
+  s_session_total = 0;
   if (s_retry) { app_timer_cancel(s_retry); s_retry = NULL; }
 }
 

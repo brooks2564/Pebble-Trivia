@@ -33,22 +33,31 @@ function decodeHTML(str) {
     .replace(/&gt;/g,     '>')
     .replace(/&quot;/g,   '"')
     .replace(/&#039;/g,   "'")
-    .replace(/&ldquo;/g,  '\u201c')
-    .replace(/&rdquo;/g,  '\u201d')
-    .replace(/&lsquo;/g,  '\u2018')
-    .replace(/&rsquo;/g,  '\u2019')
+    .replace(/&ldquo;/g,  '"')
+    .replace(/&rdquo;/g,  '"')
+    .replace(/&lsquo;/g,  "'")
+    .replace(/&rsquo;/g,  "'")
     .replace(/&hellip;/g, '...')
-    .replace(/&eacute;/g, 'e')
-    .replace(/&egrave;/g, 'e')
-    .replace(/&uuml;/g,   'u')
-    .replace(/&ouml;/g,   'o')
-    .replace(/&auml;/g,   'a')
-    .replace(/&ntilde;/g, 'n')
-    .replace(/&oacute;/g, 'o')
-    .replace(/&aacute;/g, 'a')
-    .replace(/&iacute;/g, 'i')
     .replace(/&ndash;/g,  '-')
-    .replace(/&mdash;/g,  '-');
+    .replace(/&mdash;/g,  '-')
+    /* accented vowels */
+    .replace(/&[AaEeIiOoUu]acute;/g, function(m) { return m[1].toLowerCase(); })
+    .replace(/&[AaEeIiOoUu]grave;/g, function(m) { return m[1].toLowerCase(); })
+    .replace(/&[AaEeIiOoUu]uml;/g,   function(m) { return m[1].toLowerCase(); })
+    .replace(/&[AaEeIiOoUu]circ;/g,  function(m) { return m[1].toLowerCase(); })
+    .replace(/&[Nn]tilde;/g,  'n')
+    .replace(/&[Cc]cedil;/g,  'c')
+    .replace(/&szlig;/g,  'ss')
+    .replace(/&[Aa]ring;/g,   'a')
+    .replace(/&[Oo]slash;/g,  'o')
+    .replace(/&[Aa][Ee];/g,   'ae')
+    .replace(/&[Oo][Ee];/g,   'oe')
+    /* numeric entities */
+    .replace(/&#(\d+);/g, function(m, code) {
+      var n = parseInt(code, 10);
+      /* strip anything non-ASCII that slipped through */
+      return (n < 128) ? String.fromCharCode(n) : '';
+    });
 }
 
 function buildUrl() {
@@ -194,8 +203,8 @@ function sendNextQuestion() {
 
   var payload = {};
   payload[KEY_CATEGORY] = q.category.substring(0, 63);
-  payload[KEY_QUESTION] = q.question.substring(0, 510);
-  payload[KEY_ANSWER]   = q.answer.substring(0, 254);
+  payload[KEY_QUESTION] = q.question.substring(0, 400);
+  payload[KEY_ANSWER]   = q.answer.substring(0, 200);
   Pebble.sendAppMessage(payload, function() {
     console.log('Question sent OK');
   }, function(e) {
