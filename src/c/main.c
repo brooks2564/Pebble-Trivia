@@ -436,7 +436,7 @@ static void choices_layer_draw(Layer *layer, GContext *ctx) {
     char buf[170];
     snprintf(buf, sizeof(buf), "%c) %s", 'A' + i, s_choices[i]);
     graphics_context_set_text_color(ctx, fg);
-    GRect tr = GRect(4, 2, row.size.w - 8, row_h - 2);
+    GRect tr = GRect(4, row.origin.y + 2, row.size.w - 8, row_h - 2);
     graphics_draw_text(ctx, buf,
                        fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD),
                        tr, GTextOverflowModeTrailingEllipsis,
