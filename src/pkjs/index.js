@@ -15,6 +15,7 @@ var KEY_CATEGORY     = 'CATEGORY';
 var KEY_QUESTION     = 'QUESTION';
 var KEY_ANSWER       = 'ANSWER';
 var KEY_REQUEST_NEXT = 'REQUEST_NEXT';
+var KEY_CORRECT_IDX  = 'CORRECT_IDX';
 
 var queue         = [];
 var fetching      = false;
@@ -125,9 +126,11 @@ function doFetch() {
             var correct      = decodeHTML(q.correct_answer);
             var questionText = decodeHTML(q.question);
 
+            var correctIdx = 0;
             if (q.type === 'boolean') {
-              // True/False — always the same two options
+              // True/False — always A=True, B=False
               questionText += '\nA) True\nB) False';
+              correctIdx = (correct === 'True') ? 0 : 1;
             } else {
               // Multiple choice — shuffle all four options
               var choices = q.incorrect_answers.map(function(a) {
@@ -138,6 +141,7 @@ function doFetch() {
                 var j = Math.floor(Math.random() * (i + 1));
                 var tmp = choices[i]; choices[i] = choices[j]; choices[j] = tmp;
               }
+              correctIdx = choices.indexOf(correct);
               var labels = ['A', 'B', 'C', 'D'];
               questionText += '\n' + choices.map(function(c, idx) {
                 return labels[idx] + ') ' + c;
@@ -145,9 +149,10 @@ function doFetch() {
             }
 
             queue.push({
-              category: decodeHTML(q.category),
-              question: questionText,
-              answer:   correct
+              category:   decodeHTML(q.category),
+              question:   questionText,
+              answer:     correct,
+              correctIdx: correctIdx
             });
           });
           console.log('Fetched ' + data.results.length +
@@ -202,9 +207,9 @@ function sendNextQuestion() {
   if (queue.length < 5) doFetch();  // prefetch in background
 
   var payload = {};
-  payload[KEY_CATEGORY] = q.category.substring(0, 63);
-  payload[KEY_QUESTION] = q.question.substring(0, 400);
-  payload[KEY_ANSWER]   = q.answer.substring(0, 200);
+  payload[KEY_CATEGORY]    = q.category.substring(0, 63);
+  payload[KEY_QUESTION]    = q.question.substring(0, 380);
+  payload[KEY_CORRECT_IDX] = q.correctIdx;
   Pebble.sendAppMessage(payload, function() {
     console.log('Question sent OK');
   }, function(e) {

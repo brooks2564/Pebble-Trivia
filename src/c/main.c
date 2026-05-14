@@ -1,19 +1,17 @@
 /**
  * Pebble Trivia
- * Category → Difficulty → Questions with streak counter and colours.
+ * Category → Difficulty → Questions with automatic answer selection and scoring.
  *
- * STATE_QUESTION : UP/DOWN scroll   SELECT = reveal answer
- * STATE_ANSWER   : UP = correct     DOWN = missed   SELECT = skip
- * Back from trivia resets streak and returns to difficulty picker.
- * Back from difficulty returns to category picker.
+ * STATE_SELECTING: UP/DN move choice highlight, SELECT/TAP confirm
+ * STATE_RESULT   : auto-advances after 2s (green=correct, red=wrong)
+ * Back from trivia resets score and returns to difficulty picker.
  *
  * Difficulty encoding: message value = cat_id + difficulty * 200
  * (no valid cat_id == 1, so REQUEST_NEXT=1 is unambiguous)
  *
  * Touch (emery/gabbro only):
- *   Tap              = reveal answer (STATE_QUESTION) or skip (STATE_ANSWER)
- *   Swipe up (dy<0)  = correct (STATE_ANSWER)
- *   Swipe down(dy>0) = missed  (STATE_ANSWER)
+ *   Menus:   swipe up/down moves highlight, tap = select
+ *   Trivia:  swipe up/down moves choice highlight, tap = confirm
  */
 
 #include <pebble.h>
@@ -21,37 +19,35 @@
 /* ── Message keys ──────────────────────────────────────────── */
 #define MSG_KEY_CATEGORY     0
 #define MSG_KEY_QUESTION     1
-#define MSG_KEY_ANSWER       2
+#define MSG_KEY_ANSWER       2   /* sent by JS, unused by C (kept for compat) */
 #define MSG_KEY_REQUEST_NEXT 3
-#define REQUEST_NEXT         1   /* value=1 → next question */
-
-#define SCROLL_STEP 30
+#define MSG_KEY_CORRECT_IDX  4
+#define REQUEST_NEXT         1
 
 /* Touch guard — emery and gabbro only */
 #if defined(PBL_PLATFORM_EMERY) || defined(PBL_PLATFORM_GABBRO)
 #define HAS_TOUCHSCREEN
 #endif
 
-#ifdef HAS_TOUCHSCREEN
-#define SWIPE_THRESHOLD 20   /* px of vertical travel to count as swipe */
-static GPoint s_touch_start;
-static bool   s_touch_active = false;
-#endif
+#define SCROLL_STEP      30
+#define SWIPE_THRESHOLD  20
 
 /* ── Layout ────────────────────────────────────────────────── */
 #ifdef PBL_ROUND
-#  define LABEL_H  28
-#  define HINT_H   24
-#  define HPAD     20
+#  define LABEL_H    28
+#  define HINT_H     24
+#  define HPAD       20
+#  define CHOICES_H  80   /* 4 rows × 20px */
 #else
-#  define LABEL_H  22
-#  define HINT_H   20
-#  define HPAD     0
+#  define LABEL_H    22
+#  define HINT_H     20
+#  define HPAD       0
+#  define CHOICES_H  76   /* 4 rows × 19px */
 #endif
 
 /* ── Types ─────────────────────────────────────────────────── */
 typedef enum { DIFF_ANY=0, DIFF_EASY=1, DIFF_MEDIUM=2, DIFF_HARD=3 } Difficulty;
-typedef enum { STATE_LOADING, STATE_QUESTION, STATE_ANSWER } AppState;
+typedef enum { STATE_LOADING, STATE_SELECTING, STATE_RESULT } AppState;
 typedef struct { const char *name; uint8_t id; } Category;
 
 /* ── Category data ─────────────────────────────────────────── */
@@ -70,24 +66,22 @@ static const Category CATEGORIES[] = {
 #define NUM_CATEGORIES 10
 
 #ifdef PBL_COLOR
-/* ARGB8 background colour per category */
 static const uint8_t CAT_BG[NUM_CATEGORIES] = {
-  GColorCobaltBlueARGB8,      /* All Topics    */
-  GColorSunsetOrangeARGB8,    /* General       */
-  GColorJaegerGreenARGB8,     /* Geography     */
-  GColorBulgarianRoseARGB8,   /* History       */
-  GColorLibertyARGB8,         /* Science       */
-  GColorMagentaARGB8,         /* Entertainment */
-  GColorRedARGB8,             /* Sports        */
-  GColorIslamicGreenARGB8,    /* Animals       */
-  GColorVividCeruleanARGB8,   /* True / False  */
-  GColorRajahARGB8,           /* Easy (Kids)   */
+  GColorCobaltBlueARGB8,
+  GColorSunsetOrangeARGB8,
+  GColorJaegerGreenARGB8,
+  GColorBulgarianRoseARGB8,
+  GColorLibertyARGB8,
+  GColorMagentaARGB8,
+  GColorRedARGB8,
+  GColorIslamicGreenARGB8,
+  GColorVividCeruleanARGB8,
+  GColorRajahARGB8,
 };
-/* true → white text on that background */
 static const bool CAT_WHITE_TXT[NUM_CATEGORIES] = {
   true, true, true, true, true, true, true, true, false, false
 };
-#endif /* PBL_COLOR */
+#endif
 
 /* ── Difficulty data ───────────────────────────────────────── */
 static const char *DIFF_NAMES[] = {
@@ -131,6 +125,13 @@ static void outbox_sent(DictionaryIterator *it, void *ctx) {
 static void trivia_window_push(void);
 static void diff_window_push(void);
 static void update_display(void);
+static void request_next(void);
+
+/* ── Shared touch state ────────────────────────────────────── */
+#ifdef HAS_TOUCHSCREEN
+static GPoint s_touch_start;
+static bool   s_touch_active = false;
+#endif
 
 /* ══ Category menu window ══════════════════════════════════════ */
 static Window    *s_cat_win;
@@ -141,13 +142,11 @@ static uint16_t cat_n_rows(MenuLayer *l, uint16_t s, void *c)   { return NUM_CAT
 static int16_t  cat_cell_h(MenuLayer *l, MenuIndex *i, void *c) { return 36; }
 static int16_t  cat_hdr_h(MenuLayer *l, uint16_t s, void *c)    { return 16; }
 
-static void cat_draw_hdr(GContext *ctx, const Layer *cl,
-                          uint16_t s, void *c) {
+static void cat_draw_hdr(GContext *ctx, const Layer *cl, uint16_t s, void *c) {
   menu_cell_basic_header_draw(ctx, cl, "Choose Category");
 }
 
-static void cat_draw_row(GContext *ctx, const Layer *cl,
-                          MenuIndex *idx, void *c) {
+static void cat_draw_row(GContext *ctx, const Layer *cl, MenuIndex *idx, void *c) {
 #ifdef PBL_COLOR
   if (menu_cell_layer_is_highlighted(cl)) {
     GColor bg = (GColor){.argb = CAT_BG[idx->row]};
@@ -172,6 +171,39 @@ static void cat_select(MenuLayer *l, MenuIndex *idx, void *c) {
   diff_window_push();
 }
 
+#ifdef HAS_TOUCHSCREEN
+static void cat_touch_handler(const TouchEvent *event, void *ctx) {
+  switch (event->type) {
+    case TouchEvent_Touchdown:
+      s_touch_start.x = event->x;
+      s_touch_start.y = event->y;
+      s_touch_active  = true;
+      break;
+    case TouchEvent_Liftoff: {
+      if (!s_touch_active) break;
+      s_touch_active = false;
+      int dy = (int)event->y - (int)s_touch_start.y;
+      MenuIndex idx = menu_layer_get_selected_index(s_cat_menu);
+      if (dy < -SWIPE_THRESHOLD) {
+        if (idx.row > 0) {
+          idx.row--;
+          menu_layer_set_selected_index(s_cat_menu, idx, MenuRowAlignCenter, true);
+        }
+      } else if (dy > SWIPE_THRESHOLD) {
+        if (idx.row < NUM_CATEGORIES - 1) {
+          idx.row++;
+          menu_layer_set_selected_index(s_cat_menu, idx, MenuRowAlignCenter, true);
+        }
+      } else {
+        cat_select(s_cat_menu, &idx, NULL);
+      }
+      break;
+    }
+    default: break;
+  }
+}
+#endif
+
 static void cat_win_load(Window *w) {
   Layer *root = window_get_root_layer(w);
   s_cat_menu = menu_layer_create(layer_get_bounds(root));
@@ -186,9 +218,15 @@ static void cat_win_load(Window *w) {
   });
   menu_layer_set_click_config_onto_window(s_cat_menu, w);
   layer_add_child(root, menu_layer_get_layer(s_cat_menu));
+#ifdef HAS_TOUCHSCREEN
+  touch_service_subscribe(cat_touch_handler, NULL);
+#endif
 }
 
 static void cat_win_unload(Window *w) {
+#ifdef HAS_TOUCHSCREEN
+  touch_service_unsubscribe();
+#endif
   menu_layer_destroy(s_cat_menu);
 }
 
@@ -201,8 +239,7 @@ static uint16_t diff_n_rows(MenuLayer *l, uint16_t s, void *c)   { return NUM_DI
 static int16_t  diff_cell_h(MenuLayer *l, MenuIndex *i, void *c) { return 36; }
 static int16_t  diff_hdr_h(MenuLayer *l, uint16_t s, void *c)    { return 20; }
 
-static void diff_draw_hdr(GContext *ctx, const Layer *cl,
-                           uint16_t s, void *c) {
+static void diff_draw_hdr(GContext *ctx, const Layer *cl, uint16_t s, void *c) {
 #ifdef PBL_COLOR
   GColor bg = (GColor){.argb = CAT_BG[s_cat_idx]};
   GColor fg = CAT_WHITE_TXT[s_cat_idx] ? GColorWhite : GColorBlack;
@@ -220,8 +257,7 @@ static void diff_draw_hdr(GContext *ctx, const Layer *cl,
 #endif
 }
 
-static void diff_draw_row(GContext *ctx, const Layer *cl,
-                           MenuIndex *idx, void *c) {
+static void diff_draw_row(GContext *ctx, const Layer *cl, MenuIndex *idx, void *c) {
   menu_cell_basic_draw(ctx, cl, DIFF_NAMES[idx->row], NULL, NULL);
 }
 
@@ -231,6 +267,39 @@ static void diff_select(MenuLayer *l, MenuIndex *idx, void *c) {
   if (s_retry) app_timer_cancel(s_retry);
   s_retry = app_timer_register(300, send_cat_now, NULL);
 }
+
+#ifdef HAS_TOUCHSCREEN
+static void diff_touch_handler(const TouchEvent *event, void *ctx) {
+  switch (event->type) {
+    case TouchEvent_Touchdown:
+      s_touch_start.x = event->x;
+      s_touch_start.y = event->y;
+      s_touch_active  = true;
+      break;
+    case TouchEvent_Liftoff: {
+      if (!s_touch_active) break;
+      s_touch_active = false;
+      int dy = (int)event->y - (int)s_touch_start.y;
+      MenuIndex idx = menu_layer_get_selected_index(s_diff_menu);
+      if (dy < -SWIPE_THRESHOLD) {
+        if (idx.row > 0) {
+          idx.row--;
+          menu_layer_set_selected_index(s_diff_menu, idx, MenuRowAlignCenter, true);
+        }
+      } else if (dy > SWIPE_THRESHOLD) {
+        if (idx.row < NUM_DIFF - 1) {
+          idx.row++;
+          menu_layer_set_selected_index(s_diff_menu, idx, MenuRowAlignCenter, true);
+        }
+      } else {
+        diff_select(s_diff_menu, &idx, NULL);
+      }
+      break;
+    }
+    default: break;
+  }
+}
+#endif
 
 static void diff_win_load(Window *w) {
   Layer *root = window_get_root_layer(w);
@@ -246,9 +315,15 @@ static void diff_win_load(Window *w) {
   });
   menu_layer_set_click_config_onto_window(s_diff_menu, w);
   layer_add_child(root, menu_layer_get_layer(s_diff_menu));
+#ifdef HAS_TOUCHSCREEN
+  touch_service_subscribe(diff_touch_handler, NULL);
+#endif
 }
 
 static void diff_win_unload(Window *w) {
+#ifdef HAS_TOUCHSCREEN
+  touch_service_unsubscribe();
+#endif
   menu_layer_destroy(s_diff_menu);
 }
 
@@ -262,15 +337,51 @@ static TextLayer   *s_label_layer;
 static ScrollLayer *s_scroll_layer;
 static TextLayer   *s_main_layer;
 static TextLayer   *s_hint_layer;
+static Layer       *s_choices_layer;
 
 static AppState s_state         = STATE_LOADING;
 static int      s_streak        = 0;
 static int      s_session_right = 0;
 static int      s_session_total = 0;
 static char     s_category[64];
-static char     s_question[512];
-static char     s_answer[256];
+static char     s_question[512];   /* full message text (question + embedded choices) */
+static char     s_q_display[512];  /* question text only, for scroll area */
+static char     s_choices[4][160]; /* parsed choice texts */
+static int      s_num_choices   = 0;
+static int      s_correct_idx   = 0;
+static int      s_selected_idx  = 0;
+static bool     s_last_correct  = false;
+static AppTimer *s_result_timer = NULL;
 static char     s_label_buf[80];
+
+/* Split "question\nA) opt\nB) opt..." into s_q_display + s_choices[] */
+static void parse_question(void) {
+  char *pa = strstr(s_question, "\nA) ");
+  if (!pa) {
+    strncpy(s_q_display, s_question, sizeof(s_q_display) - 1);
+    s_q_display[sizeof(s_q_display) - 1] = '\0';
+    s_num_choices = 0;
+    return;
+  }
+  int qlen = (int)(pa - s_question);
+  if (qlen >= (int)sizeof(s_q_display)) qlen = (int)sizeof(s_q_display) - 1;
+  strncpy(s_q_display, s_question, qlen);
+  s_q_display[qlen] = '\0';
+
+  const char *labels[] = {"\nA) ", "\nB) ", "\nC) ", "\nD) "};
+  s_num_choices = 0;
+  for (int i = 0; i < 4; i++) {
+    char *p = strstr(s_question, labels[i]);
+    if (!p) break;
+    p += 4;
+    char *end = strchr(p, '\n');
+    int len = end ? (int)(end - p) : (int)strlen(p);
+    if (len >= (int)sizeof(s_choices[i])) len = (int)sizeof(s_choices[i]) - 1;
+    strncpy(s_choices[i], p, len);
+    s_choices[i][len] = '\0';
+    s_num_choices++;
+  }
+}
 
 static void apply_cat_color(void) {
 #ifdef PBL_COLOR
@@ -296,8 +407,92 @@ static void set_scroll_text(const char *text) {
   scroll_layer_set_content_offset(s_scroll_layer, GPoint(0, 0), false);
 }
 
+static void choices_layer_draw(Layer *layer, GContext *ctx) {
+  if (s_num_choices == 0) return;
+  GRect bounds = layer_get_bounds(layer);
+  int row_h = bounds.size.h / s_num_choices;
+
+  for (int i = 0; i < s_num_choices; i++) {
+    GRect row = GRect(0, i * row_h, bounds.size.w, row_h);
+
+    bool is_correct = (s_state == STATE_RESULT && i == s_correct_idx);
+    bool is_wrong   = (s_state == STATE_RESULT && i == s_selected_idx && !s_last_correct);
+    bool is_sel     = (s_state == STATE_SELECTING && i == s_selected_idx);
+
+    GColor bg, fg;
+#ifdef PBL_COLOR
+    if (is_correct)    { bg = GColorGreen; fg = GColorBlack; }
+    else if (is_wrong) { bg = GColorRed;   fg = GColorWhite; }
+    else if (is_sel)   { bg = GColorBlack; fg = GColorWhite; }
+    else               { bg = GColorWhite; fg = GColorBlack; }
+#else
+    if (is_correct || is_sel) { bg = GColorBlack; fg = GColorWhite; }
+    else                      { bg = GColorWhite; fg = GColorBlack; }
+#endif
+
+    graphics_context_set_fill_color(ctx, bg);
+    graphics_fill_rect(ctx, row, 0, GCornerNone);
+
+    char buf[170];
+    snprintf(buf, sizeof(buf), "%c) %s", 'A' + i, s_choices[i]);
+    graphics_context_set_text_color(ctx, fg);
+    GRect tr = GRect(4, 2, row.size.w - 8, row_h - 2);
+    graphics_draw_text(ctx, buf,
+                       fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD),
+                       tr, GTextOverflowModeTrailingEllipsis,
+                       GTextAlignmentLeft, NULL);
+
+    if (i < s_num_choices - 1) {
+#ifdef PBL_COLOR
+      graphics_context_set_stroke_color(ctx, GColorLightGray);
+#else
+      graphics_context_set_stroke_color(ctx, GColorBlack);
+#endif
+      graphics_draw_line(ctx,
+        GPoint(0, (i + 1) * row_h - 1),
+        GPoint(bounds.size.w, (i + 1) * row_h - 1));
+    }
+  }
+}
+
+static void result_timer_cb(void *data) {
+  s_result_timer = NULL;
+  request_next();
+}
+
+static void show_result(bool correct) {
+  s_last_correct = correct;
+  s_session_total++;
+  if (correct) {
+    s_session_right++;
+    s_streak++;
+    vibes_short_pulse();
+  } else {
+    s_streak = 0;
+    vibes_double_pulse();
+  }
+  s_state = STATE_RESULT;
+  update_display();
+  if (s_result_timer) app_timer_cancel(s_result_timer);
+  s_result_timer = app_timer_register(2000, result_timer_cb, NULL);
+}
+
+static void confirm_selection(void) {
+  if (s_state != STATE_SELECTING || s_num_choices == 0) return;
+  show_result(s_selected_idx == s_correct_idx);
+}
+
+static void move_selection(int delta) {
+  if (s_state != STATE_SELECTING || s_num_choices == 0) return;
+  s_selected_idx += delta;
+  if (s_selected_idx < 0) s_selected_idx = 0;
+  if (s_selected_idx >= s_num_choices) s_selected_idx = s_num_choices - 1;
+  layer_mark_dirty(s_choices_layer);
+}
+
 static void update_display(void) {
   if (!s_scroll_layer) return;
+
   switch (s_state) {
     case STATE_LOADING:
       text_layer_set_background_color(s_label_layer, GColorBlack);
@@ -307,9 +502,10 @@ static void update_display(void) {
         fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD));
       set_scroll_text("Loading...");
       text_layer_set_text(s_hint_layer, "");
+      layer_set_hidden(s_choices_layer, true);
       break;
 
-    case STATE_QUESTION:
+    case STATE_SELECTING:
       apply_cat_color();
       if (s_session_total > 0) {
         if (s_streak > 0)
@@ -326,38 +522,45 @@ static void update_display(void) {
       text_layer_set_text(s_label_layer, s_label_buf);
       text_layer_set_font(s_main_layer,
         fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD));
-      set_scroll_text(s_question);
+      set_scroll_text(s_q_display);
+      layer_set_hidden(s_choices_layer, false);
+      layer_mark_dirty(s_choices_layer);
 #ifdef HAS_TOUCHSCREEN
-      text_layer_set_text(s_hint_layer, "TAP=reveal");
+      text_layer_set_text(s_hint_layer, "swipe=move  tap=pick");
 #else
-      text_layer_set_text(s_hint_layer, "SEL=reveal answer");
+      text_layer_set_text(s_hint_layer, "UP/DN=move  SEL=pick");
 #endif
       break;
 
-    case STATE_ANSWER:
-      apply_cat_color();
-      if (s_session_total > 0) {
-        if (s_streak > 0)
-          snprintf(s_label_buf, sizeof(s_label_buf),
-                   "ANSWER  %d/%d x%d",
-                   s_session_right, s_session_total, s_streak);
-        else
-          snprintf(s_label_buf, sizeof(s_label_buf),
-                   "ANSWER  %d/%d",
-                   s_session_right, s_session_total);
-      } else {
-        snprintf(s_label_buf, sizeof(s_label_buf), "ANSWER");
-      }
-      text_layer_set_text(s_label_layer, s_label_buf);
-      text_layer_set_font(s_main_layer,
-        fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD));
-      set_scroll_text(s_answer);
-#ifdef HAS_TOUCHSCREEN
-      text_layer_set_text(s_hint_layer, "swipe UP/DN or UP/DN btn");
+    case STATE_RESULT: {
+      GColor result_bg, result_fg;
+#ifdef PBL_COLOR
+      result_bg = s_last_correct ? GColorGreen : GColorRed;
+      result_fg = s_last_correct ? GColorBlack : GColorWhite;
 #else
-      text_layer_set_text(s_hint_layer, "UP=correct  DN=missed");
+      result_bg = GColorBlack;
+      result_fg = GColorWhite;
+#endif
+      text_layer_set_background_color(s_label_layer, result_bg);
+      text_layer_set_text_color(s_label_layer, result_fg);
+      if (s_last_correct)
+        snprintf(s_label_buf, sizeof(s_label_buf),
+                 "CORRECT!  %d/%d x%d",
+                 s_session_right, s_session_total, s_streak);
+      else
+        snprintf(s_label_buf, sizeof(s_label_buf),
+                 "WRONG  %d/%d", s_session_right, s_session_total);
+      text_layer_set_text(s_label_layer, s_label_buf);
+      set_scroll_text(s_q_display);
+      layer_set_hidden(s_choices_layer, false);
+      layer_mark_dirty(s_choices_layer);
+#ifdef HAS_TOUCHSCREEN
+      text_layer_set_text(s_hint_layer, "tap=next");
+#else
+      text_layer_set_text(s_hint_layer, "SEL=next");
 #endif
       break;
+    }
   }
 }
 
@@ -367,26 +570,17 @@ static void request_next(void) {
     dict_write_int32(it, MSG_KEY_REQUEST_NEXT, REQUEST_NEXT);
     app_message_outbox_send();
   }
-  s_state = STATE_LOADING;
+  s_state        = STATE_LOADING;
+  s_selected_idx = 0;
   update_display();
 }
 
-static void mark_correct(void) {
-  s_streak++;
-  s_session_right++;
-  s_session_total++;
-  request_next();
-}
-
-static void mark_missed(void) {
-  s_streak = 0;
-  s_session_total++;
-  request_next();
-}
-
 static void up_click(ClickRecognizerRef r, void *ctx) {
-  if (s_state == STATE_ANSWER) {
-    mark_correct();
+  if (s_state == STATE_SELECTING) {
+    move_selection(-1);
+  } else if (s_state == STATE_RESULT) {
+    if (s_result_timer) { app_timer_cancel(s_result_timer); s_result_timer = NULL; }
+    request_next();
   } else {
     GPoint off = scroll_layer_get_content_offset(s_scroll_layer);
     off.y += SCROLL_STEP;
@@ -396,8 +590,11 @@ static void up_click(ClickRecognizerRef r, void *ctx) {
 }
 
 static void down_click(ClickRecognizerRef r, void *ctx) {
-  if (s_state == STATE_ANSWER) {
-    mark_missed();
+  if (s_state == STATE_SELECTING) {
+    move_selection(1);
+  } else if (s_state == STATE_RESULT) {
+    if (s_result_timer) { app_timer_cancel(s_result_timer); s_result_timer = NULL; }
+    request_next();
   } else {
     GPoint off = scroll_layer_get_content_offset(s_scroll_layer);
     GSize  cs  = scroll_layer_get_content_size(s_scroll_layer);
@@ -411,21 +608,22 @@ static void down_click(ClickRecognizerRef r, void *ctx) {
 }
 
 static void select_click(ClickRecognizerRef r, void *ctx) {
-  switch (s_state) {
-    case STATE_LOADING: break;
-    case STATE_QUESTION:
-      s_state = STATE_ANSWER;
-      update_display();
-      vibes_short_pulse();
-      break;
-    case STATE_ANSWER:
-      request_next();   /* skip — no streak change */
-      break;
+  if (s_state == STATE_SELECTING) {
+    confirm_selection();
+  } else if (s_state == STATE_RESULT) {
+    if (s_result_timer) { app_timer_cancel(s_result_timer); s_result_timer = NULL; }
+    request_next();
   }
 }
 
+static void click_config(void *ctx) {
+  window_single_repeating_click_subscribe(BUTTON_ID_UP,   150, up_click);
+  window_single_repeating_click_subscribe(BUTTON_ID_DOWN, 150, down_click);
+  window_single_click_subscribe(BUTTON_ID_SELECT, select_click);
+}
+
 #ifdef HAS_TOUCHSCREEN
-static void touch_handler(const TouchEvent *event, void *ctx) {
+static void trivia_touch_handler(const TouchEvent *event, void *ctx) {
   if (!s_scroll_layer) return;
   switch (event->type) {
     case TouchEvent_Touchdown:
@@ -437,26 +635,20 @@ static void touch_handler(const TouchEvent *event, void *ctx) {
       if (!s_touch_active) break;
       s_touch_active = false;
       int dy = (int)event->y - (int)s_touch_start.y;
-      if (dy < -SWIPE_THRESHOLD && s_state == STATE_ANSWER) {
-        mark_correct();   /* swipe up = correct */
-      } else if (dy > SWIPE_THRESHOLD && s_state == STATE_ANSWER) {
-        mark_missed();    /* swipe down = missed */
-      } else if (dy > -SWIPE_THRESHOLD && dy < SWIPE_THRESHOLD) {
-        select_click(NULL, ctx);
+      if (s_state == STATE_SELECTING) {
+        if (dy < -SWIPE_THRESHOLD)     move_selection(-1);
+        else if (dy > SWIPE_THRESHOLD) move_selection(1);
+        else                           confirm_selection();
+      } else if (s_state == STATE_RESULT) {
+        if (s_result_timer) { app_timer_cancel(s_result_timer); s_result_timer = NULL; }
+        request_next();
       }
       break;
     }
-    default:
-      break;
+    default: break;
   }
 }
 #endif
-
-static void click_config(void *ctx) {
-  window_single_repeating_click_subscribe(BUTTON_ID_UP,   150, up_click);
-  window_single_repeating_click_subscribe(BUTTON_ID_DOWN, 150, down_click);
-  window_single_click_subscribe(BUTTON_ID_SELECT, select_click);
-}
 
 static void trivia_win_load(Window *w) {
   Layer *root = window_get_root_layer(w);
@@ -477,8 +669,17 @@ static void trivia_win_load(Window *w) {
   text_layer_set_overflow_mode(s_label_layer, GTextOverflowModeTrailingEllipsis);
   layer_add_child(root, text_layer_get_layer(s_label_layer));
 
-  /* Scroll area */
-  GRect sr = GRect(HPAD, LABEL_H + 2, W - 2*HPAD, H - LABEL_H - HINT_H - 4);
+  /* Choices canvas (above hint bar) */
+  GRect cr = GRect(HPAD, H - HINT_H - CHOICES_H, W - 2*HPAD, CHOICES_H);
+  s_choices_layer = layer_create(cr);
+  layer_set_update_proc(s_choices_layer, choices_layer_draw);
+  layer_add_child(root, s_choices_layer);
+  layer_set_hidden(s_choices_layer, true);
+
+  /* Scroll area (between label and choices) */
+  int scroll_top = LABEL_H + 2;
+  int scroll_h   = cr.origin.y - scroll_top - 2;
+  GRect sr = GRect(HPAD, scroll_top, W - 2*HPAD, scroll_h);
   s_scroll_layer = scroll_layer_create(sr);
   scroll_layer_set_shadow_hidden(s_scroll_layer, true);
   layer_add_child(root, scroll_layer_get_layer(s_scroll_layer));
@@ -501,8 +702,9 @@ static void trivia_win_load(Window *w) {
 
   s_state = STATE_LOADING;
   update_display();
+
 #ifdef HAS_TOUCHSCREEN
-  touch_service_subscribe(touch_handler, NULL);
+  touch_service_subscribe(trivia_touch_handler, NULL);
 #endif
 }
 
@@ -510,19 +712,23 @@ static void trivia_win_unload(Window *w) {
 #ifdef HAS_TOUCHSCREEN
   touch_service_unsubscribe();
 #endif
+  if (s_result_timer) { app_timer_cancel(s_result_timer); s_result_timer = NULL; }
   text_layer_destroy(s_label_layer);
   text_layer_destroy(s_main_layer);
   scroll_layer_destroy(s_scroll_layer);
   text_layer_destroy(s_hint_layer);
-  s_scroll_layer = NULL;
-  s_main_layer   = NULL;
-  s_label_layer  = NULL;
-  s_hint_layer   = NULL;
-  /* Reset state so next game starts clean */
+  layer_destroy(s_choices_layer);
+  s_scroll_layer  = NULL;
+  s_main_layer    = NULL;
+  s_label_layer   = NULL;
+  s_hint_layer    = NULL;
+  s_choices_layer = NULL;
   s_state         = STATE_LOADING;
   s_streak        = 0;
   s_session_right = 0;
   s_session_total = 0;
+  s_selected_idx  = 0;
+  s_num_choices   = 0;
   if (s_retry) { app_timer_cancel(s_retry); s_retry = NULL; }
 }
 
@@ -534,14 +740,15 @@ static void trivia_window_push(void) {
 static void inbox_received(DictionaryIterator *it, void *ctx) {
   Tuple *cat_t = dict_find(it, MSG_KEY_CATEGORY);
   Tuple *q_t   = dict_find(it, MSG_KEY_QUESTION);
-  Tuple *ans_t = dict_find(it, MSG_KEY_ANSWER);
+  Tuple *idx_t = dict_find(it, MSG_KEY_CORRECT_IDX);
 
-  if (cat_t)  strncpy(s_category, cat_t->value->cstring, sizeof(s_category) - 1);
-  if (q_t)    strncpy(s_question, q_t->value->cstring,   sizeof(s_question) - 1);
-  if (ans_t)  strncpy(s_answer,   ans_t->value->cstring, sizeof(s_answer)   - 1);
-
+  if (cat_t) strncpy(s_category, cat_t->value->cstring, sizeof(s_category) - 1);
   if (q_t) {
-    s_state = STATE_QUESTION;
+    strncpy(s_question, q_t->value->cstring, sizeof(s_question) - 1);
+    parse_question();
+    s_correct_idx  = idx_t ? (int)idx_t->value->int32 : 0;
+    s_selected_idx = 0;
+    s_state        = STATE_SELECTING;
     update_display();
   }
 }
@@ -581,6 +788,7 @@ static void init(void) {
 
 static void deinit(void) {
   if (s_retry) app_timer_cancel(s_retry);
+  if (s_result_timer) app_timer_cancel(s_result_timer);
   window_destroy(s_trivia_win);
   window_destroy(s_diff_win);
   window_destroy(s_cat_win);
