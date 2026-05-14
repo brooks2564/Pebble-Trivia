@@ -354,7 +354,7 @@ static bool     s_last_correct  = false;
 static AppTimer *s_result_timer = NULL;
 static char     s_label_buf[80];
 
-/* Marquee */
+/* Marquee (horizontal, answer choices) */
 #define MARQUEE_DELAY_MS  1000
 #define MARQUEE_TICK_MS     50
 #define MARQUEE_SPEED        3   /* px per tick */
@@ -365,6 +365,15 @@ static int       s_marquee_hold   = 0;
 static int       s_row_width      = 0;
 static AppTimer *s_marquee_delay  = NULL;
 static AppTimer *s_marquee_tick   = NULL;
+
+/* Question auto-scroll (vertical) */
+#define QSCROLL_TICK_MS   100   /* ms per px — slow upward scroll */
+#define QSCROLL_END_MS   1000   /* pause at bottom (1s) */
+#define QSCROLL_TOP_MS   2000   /* pause at top before repeating (2s) */
+static int       s_qscroll_offset = 0;
+static int       s_qscroll_max    = 0;
+static AppTimer *s_qscroll_delay  = NULL;
+static AppTimer *s_qscroll_tick   = NULL;
 
 /* Split "question\nA) opt\nB) opt..." into s_q_display + s_choices[] */
 static void parse_question(void) {
@@ -417,6 +426,55 @@ static void set_scroll_text(const char *text) {
   text_layer_set_size(s_main_layer, GSize(cw, ch));
   scroll_layer_set_content_size(s_scroll_layer, GSize(sf.size.w, ch));
   scroll_layer_set_content_offset(s_scroll_layer, GPoint(0, 0), false);
+}
+
+static void stop_qscroll(void) {
+  if (s_qscroll_delay) { app_timer_cancel(s_qscroll_delay); s_qscroll_delay = NULL; }
+  if (s_qscroll_tick)  { app_timer_cancel(s_qscroll_tick);  s_qscroll_tick  = NULL; }
+  s_qscroll_offset = 0;
+  s_qscroll_max    = 0;
+}
+
+static void qscroll_tick_cb(void *data);
+static void qscroll_top_delay_cb(void *data);
+
+static void qscroll_top_delay_cb(void *data) {
+  s_qscroll_delay = NULL;
+  if (!s_scroll_layer || s_qscroll_max <= 0) return;
+  qscroll_tick_cb(NULL);
+}
+
+static void qscroll_end_delay_cb(void *data) {
+  s_qscroll_delay = NULL;
+  if (!s_scroll_layer) return;
+  s_qscroll_offset = 0;
+  scroll_layer_set_content_offset(s_scroll_layer, GPoint(0, 0), false);
+  s_qscroll_delay = app_timer_register(QSCROLL_TOP_MS, qscroll_top_delay_cb, NULL);
+}
+
+static void qscroll_tick_cb(void *data) {
+  s_qscroll_tick = NULL;
+  if (!s_scroll_layer || s_qscroll_max <= 0) return;
+  s_qscroll_offset++;
+  if (s_qscroll_offset >= s_qscroll_max) {
+    s_qscroll_offset = s_qscroll_max;
+    scroll_layer_set_content_offset(s_scroll_layer, GPoint(0, -s_qscroll_offset), false);
+    s_qscroll_delay = app_timer_register(QSCROLL_END_MS, qscroll_end_delay_cb, NULL);
+    return;
+  }
+  scroll_layer_set_content_offset(s_scroll_layer, GPoint(0, -s_qscroll_offset), false);
+  s_qscroll_tick = app_timer_register(QSCROLL_TICK_MS, qscroll_tick_cb, NULL);
+}
+
+static void start_qscroll_if_needed(void) {
+  stop_qscroll();
+  if (!s_scroll_layer) return;
+  GSize cs = scroll_layer_get_content_size(s_scroll_layer);
+  GRect sf = layer_get_frame(scroll_layer_get_layer(s_scroll_layer));
+  s_qscroll_max = cs.h - sf.size.h;
+  if (s_qscroll_max <= 0) return;
+  s_qscroll_offset = 0;
+  s_qscroll_delay = app_timer_register(QSCROLL_TOP_MS, qscroll_top_delay_cb, NULL);
 }
 
 static void stop_marquee(void) {
@@ -550,6 +608,7 @@ static void show_result(bool correct) {
 
 static void confirm_selection(void) {
   if (s_state != STATE_SELECTING || s_num_choices == 0) return;
+  stop_qscroll();
   stop_marquee();
   show_result(s_selected_idx == s_correct_idx);
 }
@@ -638,6 +697,7 @@ static void update_display(void) {
 }
 
 static void request_next(void) {
+  stop_qscroll();
   stop_marquee();
   DictionaryIterator *it;
   if (app_message_outbox_begin(&it) == APP_MSG_OK) {
@@ -787,6 +847,7 @@ static void trivia_win_unload(Window *w) {
 #ifdef HAS_TOUCHSCREEN
   touch_service_unsubscribe();
 #endif
+  stop_qscroll();
   stop_marquee();
   if (s_result_timer) { app_timer_cancel(s_result_timer); s_result_timer = NULL; }
   text_layer_destroy(s_label_layer);
@@ -826,6 +887,7 @@ static void inbox_received(DictionaryIterator *it, void *ctx) {
     s_selected_idx = 0;
     s_state        = STATE_SELECTING;
     update_display();
+    start_qscroll_if_needed();
     start_marquee_if_needed();
   }
 }
