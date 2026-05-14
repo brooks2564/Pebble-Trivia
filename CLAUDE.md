@@ -2,13 +2,13 @@
 
 ## Project Overview
 **Pebble Trivia** is a Pebble smartwatch **watchapp** (not a watchface) that pulls trivia questions from the Open Trivia Database (opentdb.com) — free, no API key required.
-UUID: `a1b2c3d4-e5f6-7890-abcd-ef1234567890`
+UUID: `f550f965-fb5a-4ecd-ab61-f8b267824769`
 GitHub: `brooks2564/Pebble-Trivia`
 
 ## Build & Install
 ```bash
 pebble build
-pebble install --phone 192.168.0.182
+pebble install --phone 192.168.0.228
 ```
 
 ## Project Structure
@@ -72,6 +72,13 @@ aplite, basalt, chalk, diorite, emery, flint, gabbro
 | 27     | Animals     |
 | 101    | Easy (Kids) |
 | 102    | True/False  |
+
+## CloudPebble (repebble)
+Import this repo directly into CloudPebble:
+```
+https://cloudpebble.repebble.com/ide/import/github/brooks2564/Pebble-Trivia
+```
+cloudpebble.net is dead (redirects to Fitbit). Use cloudpebble.repebble.com instead.
 
 ## Git
 ```bash
