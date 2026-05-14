@@ -37,12 +37,12 @@
 #  define LABEL_H    28
 #  define HINT_H     24
 #  define HPAD       20
-#  define CHOICES_H  80   /* 4 rows × 20px */
+#  define CHOICES_H  104  /* 4 rows × 26px, GOTHIC_18_BOLD */
 #else
 #  define LABEL_H    22
 #  define HINT_H     20
 #  define HPAD       0
-#  define CHOICES_H  76   /* 4 rows × 19px */
+#  define CHOICES_H  104  /* 4 rows × 26px, GOTHIC_18_BOLD */
 #endif
 
 /* ── Types ─────────────────────────────────────────────────── */
@@ -249,7 +249,7 @@ static void diff_draw_hdr(GContext *ctx, const Layer *cl, uint16_t s, void *c) {
   graphics_context_set_text_color(ctx, fg);
   GRect tr = GRect(4, 2, b.size.w - 8, b.size.h);
   graphics_draw_text(ctx, CATEGORIES[s_cat_idx].name,
-                     fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD),
+                     fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD),
                      tr, GTextOverflowModeTrailingEllipsis,
                      GTextAlignmentCenter, NULL);
 #else
@@ -458,7 +458,7 @@ static void start_marquee_if_needed(void) {
   if (s_num_choices == 0 || s_row_width == 0) return;
   char buf[170];
   snprintf(buf, sizeof(buf), "%c) %s", 'A' + s_selected_idx, s_choices[s_selected_idx]);
-  GFont font = fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD);
+  GFont font = fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD);
   GSize sz = graphics_text_layout_get_content_size(
     buf, font, GRect(0, 0, 4000, 50),
     GTextOverflowModeWordWrap, GTextAlignmentLeft);
@@ -497,7 +497,7 @@ static void choices_layer_draw(Layer *layer, GContext *ctx) {
     char buf[170];
     snprintf(buf, sizeof(buf), "%c) %s", 'A' + i, s_choices[i]);
     graphics_context_set_text_color(ctx, fg);
-    GFont font = fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD);
+    GFont font = fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD);
     if (is_sel && s_marquee_offset > 0) {
       /* Scroll text left — layer clips anything outside its bounds */
       GRect tr = GRect(4 - s_marquee_offset, row.origin.y + 2, 4000, row_h - 2);
@@ -734,7 +734,7 @@ static void trivia_win_load(Window *w) {
   text_layer_set_background_color(s_label_layer, GColorBlack);
   text_layer_set_text_color(s_label_layer, GColorWhite);
   text_layer_set_font(s_label_layer,
-    fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD));
+    fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD));
   text_layer_set_text_alignment(s_label_layer, GTextAlignmentCenter);
   text_layer_set_overflow_mode(s_label_layer, GTextOverflowModeTrailingEllipsis);
   layer_add_child(root, text_layer_get_layer(s_label_layer));
