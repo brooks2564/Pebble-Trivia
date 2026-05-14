@@ -354,6 +354,18 @@ static bool     s_last_correct  = false;
 static AppTimer *s_result_timer = NULL;
 static char     s_label_buf[80];
 
+/* Marquee */
+#define MARQUEE_DELAY_MS  1000
+#define MARQUEE_TICK_MS     50
+#define MARQUEE_SPEED        3   /* px per tick */
+#define MARQUEE_HOLD_TICKS  30   /* frames to hold at end before looping */
+static int       s_marquee_offset = 0;
+static int       s_marquee_max    = 0;
+static int       s_marquee_hold   = 0;
+static int       s_row_width      = 0;
+static AppTimer *s_marquee_delay  = NULL;
+static AppTimer *s_marquee_tick   = NULL;
+
 /* Split "question\nA) opt\nB) opt..." into s_q_display + s_choices[] */
 static void parse_question(void) {
   char *pa = strstr(s_question, "\nA) ");
@@ -407,6 +419,55 @@ static void set_scroll_text(const char *text) {
   scroll_layer_set_content_offset(s_scroll_layer, GPoint(0, 0), false);
 }
 
+static void stop_marquee(void) {
+  if (s_marquee_delay) { app_timer_cancel(s_marquee_delay); s_marquee_delay = NULL; }
+  if (s_marquee_tick)  { app_timer_cancel(s_marquee_tick);  s_marquee_tick  = NULL; }
+  s_marquee_offset = 0;
+  s_marquee_max    = 0;
+}
+
+static void marquee_tick_cb(void *data);
+
+static void marquee_tick_cb(void *data) {
+  s_marquee_tick = NULL;
+  if (s_state != STATE_SELECTING || !s_choices_layer) return;
+  if (s_marquee_offset >= s_marquee_max) {
+    if (--s_marquee_hold > 0) {
+      /* hold at end */
+    } else {
+      s_marquee_offset = 0;
+      s_marquee_hold   = MARQUEE_HOLD_TICKS;
+    }
+  } else {
+    s_marquee_offset += MARQUEE_SPEED;
+    if (s_marquee_offset > s_marquee_max) s_marquee_offset = s_marquee_max;
+  }
+  layer_mark_dirty(s_choices_layer);
+  s_marquee_tick = app_timer_register(MARQUEE_TICK_MS, marquee_tick_cb, NULL);
+}
+
+static void marquee_delay_cb(void *data) {
+  s_marquee_delay = NULL;
+  if (s_state != STATE_SELECTING || !s_choices_layer || s_marquee_max == 0) return;
+  s_marquee_hold = MARQUEE_HOLD_TICKS;
+  marquee_tick_cb(NULL);
+}
+
+static void start_marquee_if_needed(void) {
+  stop_marquee();
+  if (s_num_choices == 0 || s_row_width == 0) return;
+  char buf[170];
+  snprintf(buf, sizeof(buf), "%c) %s", 'A' + s_selected_idx, s_choices[s_selected_idx]);
+  GFont font = fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD);
+  GSize sz = graphics_text_layout_get_content_size(
+    buf, font, GRect(0, 0, 4000, 50),
+    GTextOverflowModeWordWrap, GTextAlignmentLeft);
+  if (sz.w > s_row_width) {
+    s_marquee_max   = sz.w - s_row_width + 4;
+    s_marquee_delay = app_timer_register(MARQUEE_DELAY_MS, marquee_delay_cb, NULL);
+  }
+}
+
 static void choices_layer_draw(Layer *layer, GContext *ctx) {
   if (s_num_choices == 0) return;
   GRect bounds = layer_get_bounds(layer);
@@ -436,11 +497,17 @@ static void choices_layer_draw(Layer *layer, GContext *ctx) {
     char buf[170];
     snprintf(buf, sizeof(buf), "%c) %s", 'A' + i, s_choices[i]);
     graphics_context_set_text_color(ctx, fg);
-    GRect tr = GRect(4, row.origin.y + 2, row.size.w - 8, row_h - 2);
-    graphics_draw_text(ctx, buf,
-                       fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD),
-                       tr, GTextOverflowModeTrailingEllipsis,
-                       GTextAlignmentLeft, NULL);
+    GFont font = fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD);
+    if (is_sel && s_marquee_offset > 0) {
+      /* Scroll text left — layer clips anything outside its bounds */
+      GRect tr = GRect(4 - s_marquee_offset, row.origin.y + 2, 4000, row_h - 2);
+      graphics_draw_text(ctx, buf, font, tr,
+                         GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
+    } else {
+      GRect tr = GRect(4, row.origin.y + 2, row.size.w - 8, row_h - 2);
+      graphics_draw_text(ctx, buf, font, tr,
+                         GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+    }
 
     if (i < s_num_choices - 1) {
 #ifdef PBL_COLOR
@@ -479,6 +546,7 @@ static void show_result(bool correct) {
 
 static void confirm_selection(void) {
   if (s_state != STATE_SELECTING || s_num_choices == 0) return;
+  stop_marquee();
   show_result(s_selected_idx == s_correct_idx);
 }
 
@@ -488,6 +556,7 @@ static void move_selection(int delta) {
   if (s_selected_idx < 0) s_selected_idx = 0;
   if (s_selected_idx >= s_num_choices) s_selected_idx = s_num_choices - 1;
   layer_mark_dirty(s_choices_layer);
+  start_marquee_if_needed();
 }
 
 static void update_display(void) {
@@ -565,6 +634,7 @@ static void update_display(void) {
 }
 
 static void request_next(void) {
+  stop_marquee();
   DictionaryIterator *it;
   if (app_message_outbox_begin(&it) == APP_MSG_OK) {
     dict_write_int32(it, MSG_KEY_REQUEST_NEXT, REQUEST_NEXT);
@@ -671,6 +741,7 @@ static void trivia_win_load(Window *w) {
 
   /* Choices canvas (above hint bar) */
   GRect cr = GRect(HPAD, H - HINT_H - CHOICES_H, W - 2*HPAD, CHOICES_H);
+  s_row_width = cr.size.w - 8;   /* usable text width per row */
   s_choices_layer = layer_create(cr);
   layer_set_update_proc(s_choices_layer, choices_layer_draw);
   layer_add_child(root, s_choices_layer);
@@ -712,6 +783,7 @@ static void trivia_win_unload(Window *w) {
 #ifdef HAS_TOUCHSCREEN
   touch_service_unsubscribe();
 #endif
+  stop_marquee();
   if (s_result_timer) { app_timer_cancel(s_result_timer); s_result_timer = NULL; }
   text_layer_destroy(s_label_layer);
   text_layer_destroy(s_main_layer);
@@ -750,6 +822,7 @@ static void inbox_received(DictionaryIterator *it, void *ctx) {
     s_selected_idx = 0;
     s_state        = STATE_SELECTING;
     update_display();
+    start_marquee_if_needed();
   }
 }
 
