@@ -358,7 +358,7 @@ static char     s_label_buf[80];
 #define MARQUEE_DELAY_MS  1000
 #define MARQUEE_TICK_MS     50
 #define MARQUEE_SPEED        3   /* px per tick */
-#define MARQUEE_HOLD_TICKS  30   /* frames to hold at end before looping */
+#define MARQUEE_HOLD_TICKS  20   /* frames to hold at end (20 × 50ms = 1s) */
 static int       s_marquee_offset = 0;
 static int       s_marquee_max    = 0;
 static int       s_marquee_hold   = 0;
@@ -427,6 +427,7 @@ static void stop_marquee(void) {
 }
 
 static void marquee_tick_cb(void *data);
+static void marquee_delay_cb(void *data);
 
 static void marquee_tick_cb(void *data) {
   s_marquee_tick = NULL;
@@ -435,8 +436,11 @@ static void marquee_tick_cb(void *data) {
     if (--s_marquee_hold > 0) {
       /* hold at end */
     } else {
+      /* end hold done — jump to start, then wait 1s before scrolling again */
       s_marquee_offset = 0;
-      s_marquee_hold   = MARQUEE_HOLD_TICKS;
+      layer_mark_dirty(s_choices_layer);
+      s_marquee_delay = app_timer_register(MARQUEE_DELAY_MS, marquee_delay_cb, NULL);
+      return;
     }
   } else {
     s_marquee_offset += MARQUEE_SPEED;
